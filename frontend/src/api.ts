@@ -469,6 +469,114 @@ export type RunChecks = {
   } | null;
 };
 
+/**
+ * One family's row in the leaderboard.
+ *
+ * `status` is first because everything else depends on it: a row that did not succeed
+ * has a `reason` and no metrics, and rendering a metric without checking would print
+ * `undefined` where an explanation belongs. There is deliberately no score field on a
+ * failed row — the backend records a reason rather than a zero, and this type refuses
+ * to offer a number that would be a fabrication.
+ */
+export type ModelRow = {
+  family: string;
+  label: string;
+  rank: number | null;
+  status: "succeeded" | "failed" | "skipped";
+  reason?: string;
+  metrics?: Record<string, number | number[][] | string[] | null>;
+  primary_metric_value: number | null;
+  n_train_rows_used?: number;
+  n_train_rows_available?: number;
+  sampled?: boolean;
+  sampling_note?: string;
+  n_features?: number;
+  train_ms?: number;
+  beats_baseline?: boolean;
+  margin_over_baseline?: number;
+};
+
+export type Leaderboard = {
+  task: string;
+  primary_metric: string;
+  best_family: string | null;
+  baseline: {
+    status: string;
+    estimator?: string;
+    metrics?: Record<string, number | number[][] | string[] | null>;
+    reason?: string;
+  };
+  /** Measured, not assumed — see `services/training.py`. */
+  concurrency: {
+    workers: number;
+    submitted: number;
+    max_observed_overlap: number;
+    wall_clock_ms: number;
+    summed_model_ms: number;
+    speedup_vs_serial: number | null;
+    executor: string;
+    threads_per_model: number;
+    note: string;
+  };
+  duration_ms: number;
+  split: { n_train_rows: number; n_test_rows: number; n_features: number };
+  seed: number;
+  notes: string[];
+  models: ModelRow[];
+  explanation_method: string | null;
+};
+
+/**
+ * The winning model's global explanation.
+ *
+ * `is_shap` exists so the interface cannot print a SHAP heading over permutation
+ * importances. Read it, not `method`, when choosing wording.
+ */
+export type Explanation = {
+  status: "succeeded" | "failed" | "unavailable";
+  family?: string;
+  label?: string;
+  reason?: string;
+  method: "shap_tree" | "shap_linear" | "permutation" | null;
+  is_shap: boolean;
+  method_label?: string;
+  explainer?: string;
+  shap_available?: boolean;
+  shap_version?: string | null;
+  fallback_reason?: string | null;
+  n_rows_used?: number;
+  n_rows_available?: number;
+  sampled?: boolean;
+  sampling_note?: string;
+  n_features?: number;
+  features?: { feature: string; value: number }[];
+};
+
+export type Recommendation = {
+  run_id: string;
+  task: string;
+  /** Non-null when the engine refused to rank. A refusal is incomplete, not a result. */
+  declined: { reason: string; detail?: string } | string | null;
+  corpus: { stored: number; considered: number; metafeature_version: number };
+  ranking: {
+    family: string;
+    label: string;
+    score: number;
+    neighbours_scored: number;
+    spread: number;
+  }[];
+  neighbours: {
+    dataset: string;
+    similarity: number;
+    best_family: string;
+    n_rows: number;
+    n_cols: number;
+    metric: string;
+    scores: Record<string, number>;
+  }[];
+  rationale: string[];
+};
+
 export type Run = {
   id: string;
   status: "running" | "succeeded" | "failed";
@@ -641,6 +749,27 @@ export const api = {
     request<DatasetProfile>(`/api/datasets/${datasetId}/profile`),
 
   artifactUrl: (runId: string, name: string) => `/api/runs/${runId}/artifacts/${name}`,
+
+  // --- training, explainability and the recommendation ------------------------------
+  //
+  // `trainRun` is a long POST, not a job submission: the backend trains synchronously
+  // and returns the leaderboard. On the bundled sample that is about a second; on a
+  // large file it is minutes, and the caller is expected to show a pending state rather
+  // than to poll.
+
+  trainRun: (runId: string) =>
+    request<Leaderboard>(`/api/runs/${runId}/train`, { method: "POST" }),
+
+  readModels: (runId: string) => request<Leaderboard>(`/api/runs/${runId}/models`),
+
+  readExplanation: (runId: string) =>
+    request<Explanation>(`/api/runs/${runId}/explanation`),
+
+  recommendation: (runId: string) =>
+    request<Recommendation>(`/api/runs/${runId}/recommendation`),
+
+  /** Everything this run produced, in one archive. A plain link — no fetch needed. */
+  bundleUrl: (runId: string) => `/api/runs/${runId}/bundle.zip`,
 
   deleteDataset: (datasetId: string) =>
     request<{

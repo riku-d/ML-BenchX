@@ -25,6 +25,9 @@ cannot be explained is not.
 
 from __future__ import annotations
 
+import io
+import json
+import zipfile
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -42,7 +45,7 @@ from app.db import (
     get_session,
 )
 from app.plan import ACTIONS_FOR_KIND
-from app.services import planning
+from app.services import planning, results
 from app.services.ingest import IngestError, IngestResult, read_upload
 from app.storage import StorageError, get_storage
 
@@ -336,6 +339,215 @@ def list_runs(dataset_id: str, session: Session = Depends(get_session)) -> Any:
         select(Run).where(Run.dataset_id == dataset_id).order_by(Run.created_at.desc())
     ).all()
     return {"dataset_id": dataset_id, "runs": [run_view(row, detail=False) for row in rows]}
+
+
+# --------------------------------------------------------------------------------------
+# Training and explainability routes — Stages 5 and 6
+# --------------------------------------------------------------------------------------
+
+
+def _get_run(run_id: str, session: Session) -> Run:
+    run = session.get(Run, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="No run with that id.")
+    return run
+
+
+@router.post(
+    "/api/runs/{run_id}/train",
+    status_code=201,
+    summary="Train the six candidate families on this run's data",
+)
+def train_run(run_id: str, session: Session = Depends(get_session)) -> Any:
+    """Fit all six families concurrently, score them on the held-out fold, explain the
+    winner, and store both results as artifacts of this run.
+
+    **This is synchronous.** It returns when training is done, which on a small dataset
+    is seconds and on a large one is minutes. That is a deliberate simplification for a
+    single-user local application: a status machine, a poll loop and a background task
+    are three moving parts that buy nothing when there is one user who is waiting for
+    the answer anyway. The honest cost is that a large file holds the request open, and
+    the row caps in ``services/training.py`` are what bound it.
+    """
+    run = _get_run(run_id, session)
+    try:
+        payload = results.train_run(session, run)
+    except results.ResultsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    session.commit()
+    return payload
+
+
+@router.get("/api/runs/{run_id}/models", summary="The leaderboard for this run")
+def read_models(run_id: str, session: Session = Depends(get_session)) -> Any:
+    """The stored leaderboard, or a 404 saying training has not been run yet.
+
+    A 404 rather than an empty leaderboard: "no models have been trained" and "six
+    models were trained and all scored zero" are different facts, and an empty list
+    would let a caller confuse them.
+    """
+    run = _get_run(run_id, session)
+    payload = results.stored_results(run, "models")
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No models have been trained for this run yet. POST to /train first.",
+        )
+    return payload
+
+
+@router.get("/api/runs/{run_id}/explanation", summary="The winning model's explanation")
+def read_explanation(run_id: str, session: Session = Depends(get_session)) -> Any:
+    """The stored explanation of the top model.
+
+    The payload names its own method (``shap_tree``, ``shap_linear`` or
+    ``permutation``) and carries an ``is_shap`` boolean, so a caller cannot render a
+    SHAP heading over permutation importances.
+    """
+    run = _get_run(run_id, session)
+    payload = results.stored_results(run, "explain")
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No explanation has been produced for this run yet. POST to /train first.",
+        )
+    return payload
+
+
+def _bundle_readme(run: Run, models: dict[str, Any] | None, explain: dict[str, Any] | None) -> str:
+    """A plain-text index of what is in the archive, written from the run itself.
+
+    Generated rather than templated: every figure below is read from the run and its
+    artifacts, so a README that says six models were trained is a README of an archive
+    in which six models were trained.
+    """
+    lines = [
+        "ML-BenchX — run bundle",
+        "=" * 48,
+        "",
+        f"run id        : {run.id}",
+        f"dataset id    : {run.dataset_id}",
+        f"plan          : {run.plan_id} (version {run.plan_version})",
+        f"target        : {run.target}",
+        f"task          : {run.task}",
+        f"split         : {run.train_rows} train / {run.test_rows} held out, "
+        f"test_size={run.test_size}, seed={run.seed}, stratified={run.stratified}",
+        f"features      : {run.n_features}",
+        f"output hash   : {run.output_hash}",
+        "",
+        "Files",
+        "-" * 48,
+        "train.parquet      prepared training fold, target column included",
+        "test.parquet       prepared held-out fold, target column included",
+        "plan.json          every per-column decision, as reviewed",
+        "schema.json        the inference contract for this pipeline",
+        "log.json           the full execution log, step by step",
+        "pipeline.joblib    the fitted scikit-learn ColumnTransformer",
+        "pipeline.py        standalone Python that reproduces the preparation",
+    ]
+
+    if models:
+        lines += [
+            "models.json        the leaderboard: six families, held-out scores",
+            "",
+            "Models",
+            "-" * 48,
+            f"ranked by     : {models.get('primary_metric')}",
+            f"best family   : {models.get('best_family')}",
+            f"concurrency   : {models.get('concurrency', {}).get('max_observed_overlap')} of "
+            f"{models.get('concurrency', {}).get('workers')} workers observed running at once",
+            "",
+        ]
+        for row in models.get("models", []):
+            if row.get("status") == "succeeded":
+                lines.append(
+                    f"  {row.get('rank')}. {row.get('label'):<24} "
+                    f"{models.get('primary_metric')}={row.get('primary_metric_value'):.4f}"
+                    f"  rows={row.get('n_train_rows_used')}"
+                    + ("  [sampled]" if row.get("sampled") else "")
+                )
+            else:
+                lines.append(
+                    f"  -  {row.get('label'):<24} {row.get('status')}: {row.get('reason', '')[:90]}"
+                )
+        lines.append("")
+        lines.append(
+            "Scores are measured on the held-out fold, which no transformer was fitted "
+            "on. A family with no score has a reason, never a zero."
+        )
+    else:
+        lines.append("")
+        lines.append("No models were trained for this run.")
+
+    if explain and explain.get("status") == "succeeded":
+        lines += [
+            "",
+            "explanation.json   global feature importance for the winning model",
+            "",
+            "Explanation",
+            "-" * 48,
+            f"method        : {explain.get('method')} ({explain.get('method_label')})",
+            f"genuine SHAP  : {explain.get('is_shap')}",
+            f"explainer     : {explain.get('explainer')}",
+            f"sampling      : {explain.get('sampling_note')}",
+        ]
+        if explain.get("fallback_reason"):
+            lines.append(f"note          : {explain['fallback_reason']}")
+
+    lines += ["", "Generated by ML-BenchX. Local-first, single user.", ""]
+    return "\n".join(lines)
+
+
+@router.get("/api/runs/{run_id}/bundle.zip", summary="Download everything for this run")
+def download_bundle(run_id: str, session: Session = Depends(get_session)) -> Any:
+    """Every artifact this run produced, in one archive, with a generated README.
+
+    The same bytes the individual download route serves — read from storage rather than
+    recomputed, so the archive cannot disagree with what the screen showed.
+
+    An artifact that is missing is skipped rather than failing the download: a run whose
+    models were never trained still has data, a plan and a log worth taking away, and
+    the README says what is and is not there.
+    """
+    run = _get_run(run_id, session)
+    if run.status != "succeeded":
+        raise HTTPException(
+            status_code=400,
+            detail=f"This run's status is {run.status!r}; it produced no artifacts to bundle.",
+        )
+
+    storage = get_storage()
+    buffer = io.BytesIO()
+    included: list[str] = []
+
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, key in sorted((run.artifacts or {}).items()):
+            if name not in planning.ARTIFACT_NAMES:
+                continue
+            try:
+                archive.writestr(planning.ARTIFACT_NAMES[name], storage.get(key))
+                included.append(name)
+            except StorageError:
+                # A stranded key is a storage problem, not a reason to refuse the
+                # other six files. The README records what made it in.
+                continue
+
+        models = results.stored_results(run, "models")
+        explain = results.stored_results(run, "explain")
+        archive.writestr("README.txt", _bundle_readme(run, models, explain))
+        archive.writestr(
+            "run.json",
+            json.dumps(run_view(run), indent=2, default=str),
+        )
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="mlbenchx_run_{run.id[:12]}.zip"',
+            "X-Artifacts-Included": ",".join(included),
+        },
+    )
 
 
 @router.get("/api/runs/{run_id}/artifacts/{name}", summary="Download one artifact")

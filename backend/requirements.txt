@@ -18,6 +18,18 @@ pyarrow==23.0.1          # parquet artifacts (spec §6) and parquet ingestion (�
 openpyxl==3.1.5          # xlsx ingestion (§1)
 charset-normalizer==3.4.6  # encoding fallback (§1)
 
+# Stage 6 explainability. The only dependency this stage added, and it is a real one:
+# permutation importance is a different measurement and the product must not call it
+# SHAP. `services/explainability.py` uses TreeExplainer and LinearExplainer only, and
+# falls back to permutation importance — clearly labelled — when neither can read a
+# fitted model.
+#
+# Installed with the numeric pins above as constraints, because the wheel's own
+# requirements are open-ended and would otherwise be free to move numpy. Verified on
+# macOS 12 / CPython 3.12 x86_64: a cp312-abi3 wheel with no numba in the dependency
+# chain, so nothing here is built from source.
+shap==0.54.1
+
 # --- web ------------------------------------------------------------------------------
 fastapi==0.141.1
 starlette==1.5.0

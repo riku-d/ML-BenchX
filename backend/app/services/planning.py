@@ -69,6 +69,13 @@ ARTIFACT_NAMES: dict[str, str] = {
     "train": "train.parquet",
     "test": "test.parquet",
     "script": "pipeline.py",
+    #: Stage 5 and 6, written by `services/results.py` after the run itself finished.
+    #: They are artifacts of the same run rather than a separate resource because they
+    #: describe the same prepared data — and because adding them here means the existing
+    #: download route and the existing `run.artifacts` list carry them with no new
+    #: surface to maintain.
+    "models": "models.json",
+    "explain": "explanation.json",
 }
 
 #: Which media type each artifact is served as.
@@ -80,6 +87,8 @@ ARTIFACT_MEDIA: dict[str, str] = {
     "train": "application/vnd.apache.parquet",
     "test": "application/vnd.apache.parquet",
     "script": "text/x-python",
+    "models": "application/json",
+    "explain": "application/json",
 }
 
 

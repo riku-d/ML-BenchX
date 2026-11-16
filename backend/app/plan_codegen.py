@@ -76,9 +76,21 @@ functions are the implementation; you can change those too, but then this file i
 longer a reproduction of the run it came from.
 """
 
+# The engine below is copied out of the application with `inspect.getsource`, so it
+# arrives with the application's own type annotations — `ColumnPlan`, `PreprocessingPlan`
+# and others that name classes this standalone script deliberately does not contain.
+#
+# This line makes every annotation a lazy string, so none of those names is ever looked
+# up and the script needs no import of the app it came from. Python 3.14 does this by
+# default (PEP 649), which is why the omission was invisible until the script was run on
+# an earlier interpreter; stating it explicitly makes the generated file run on 3.9
+# through 3.14 alike, which is the promise "download the pipeline" makes to the user.
+from __future__ import annotations
+
 import json
 import math
 from types import SimpleNamespace
+from typing import Any  # noqa: F401 - the copied engine annotates with it
 
 import numpy as np
 import pandas as pd

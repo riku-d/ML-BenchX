@@ -37,11 +37,14 @@ import {
   ApiError,
   type ColumnPlan,
   type ColumnProfile,
+  type Explanation,
   type Histogram,
+  type Leaderboard,
   type Plan,
   type PlanAction,
   type PlanOptions,
   type PlanWarning,
+  type Recommendation,
   type Run,
 } from "../api";
 // Note: `Tooltip` in this file is recharts', not ours. The vocabulary tooltip arrives
@@ -399,6 +402,399 @@ function ColumnRow({
 }
 
 /** Everything the run measured about the split itself. */
+/** A metric's value, formatted, or a dash where there is genuinely no number. */
+function metric(value: number | null | undefined, digits = 4): string {
+  return value === null || value === undefined || !Number.isFinite(value)
+    ? "—"
+    : value.toFixed(digits);
+}
+
+/**
+ * The horizontal importance chart.
+ *
+ * Separate from `ColumnHistogram` because the axes are transposed — feature names are
+ * long and belong on the vertical axis, where they have room to be read.
+ */
+function ImportanceChart({
+  features,
+}: {
+  features: { feature: string; value: number }[];
+}) {
+  const bars = useMemo(
+    () => features.slice(0, 12).map((f) => ({ label: f.feature, value: f.value })),
+    [features],
+  );
+  if (!bars.length) {
+    return <p className="text-xs text-faint">No importances to draw.</p>;
+  }
+  return (
+    <div className="w-full" style={{ height: Math.max(140, bars.length * 22) }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart
+          data={bars}
+          layout="vertical"
+          margin={{ top: 4, right: 12, bottom: 0, left: 8 }}
+        >
+          <CartesianGrid strokeDasharray="2 4" stroke="var(--color-line)" horizontal={false} />
+          <XAxis
+            type="number"
+            tick={{ fontSize: 9, fill: "var(--color-muted)" }}
+            stroke="var(--color-line-strong)"
+          />
+          <YAxis
+            type="category"
+            dataKey="label"
+            width={150}
+            tick={{ fontSize: 9, fill: "var(--color-muted)" }}
+            stroke="var(--color-line-strong)"
+          />
+          <Tooltip
+            contentStyle={{
+              fontSize: 11,
+              background: "var(--color-raised)",
+              border: "1px solid var(--color-line-strong)",
+              borderRadius: 4,
+            }}
+            cursor={{ fill: "var(--color-line)" }}
+          />
+          <Bar dataKey="value" radius={[0, 2, 2, 0]} fill="var(--color-accent)" />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/**
+ * Stages 5, 6 and 7 on one panel: train six families, rank them, explain the winner,
+ * and show what the experiment history would have recommended.
+ *
+ * Three deliberate choices about honesty, each mirroring a backend guarantee:
+ *
+ * **A family that did not score shows its reason, never a number.** The row is rendered
+ * from `status`, so there is no code path that can print a zero for a model that was
+ * never fitted.
+ *
+ * **The explanation's heading comes from `is_shap`**, not from a guess about the family.
+ * Permutation importance is labelled as permutation importance, in the heading and in
+ * the sentence beneath it.
+ *
+ * **A recommender that declines is reported as incomplete.** `declined` renders as a
+ * warning, not as an empty ranking that would look like "no algorithm suits your data".
+ */
+function ModelsPanel({ run }: { run: Run }) {
+  const [board, setBoard] = useState<Leaderboard | null>(null);
+  const [explanation, setExplanation] = useState<Explanation | null>(null);
+  const [advice, setAdvice] = useState<Recommendation | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Results already stored are loaded rather than recomputed. Training is the expensive
+  // step; a reload should not pay for it twice.
+  const loadStored = useCallback(async () => {
+    const [models, explain] = await Promise.all([
+      api.readModels(run.id).catch(() => null),
+      api.readExplanation(run.id).catch(() => null),
+    ]);
+    if (models) setBoard(models);
+    if (explain) setExplanation(explain);
+  }, [run.id]);
+
+  useEffect(() => {
+    void loadStored();
+  }, [loadStored]);
+
+  // The recommendation is independent of training — it describes the dataset, not the
+  // models — so it is fetched straight away.
+  useEffect(() => {
+    let live = true;
+    api
+      .recommendation(run.id)
+      .then((value) => live && setAdvice(value))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [run.id]);
+
+  const train = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setBoard(await api.trainRun(run.id));
+      setExplanation(await api.readExplanation(run.id).catch(() => null));
+    } catch (exc) {
+      setError(
+        exc instanceof ApiError ? exc.message : "Training failed before it could report.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [run.id]);
+
+  const primary = board?.primary_metric ?? "";
+  const baselineValue =
+    typeof board?.baseline?.metrics?.[primary] === "number"
+      ? (board.baseline.metrics[primary] as number)
+      : null;
+
+  return (
+    <div className="space-y-5">
+      {/* ---- Stage 5: train ------------------------------------------------------ */}
+      <div>
+        <PanelHeading>Six candidate models</PanelHeading>
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <Button onClick={train} disabled={busy}>
+            {busy ? "Training…" : board ? "Train again" : "Train six models"}
+          </Button>
+          {busy ? (
+            <span className="flex items-center gap-2 text-xs text-muted">
+              <Spinner /> Fitting six families on {run.split.train_rows.toLocaleString()}{" "}
+              training rows, three at a time.
+            </span>
+          ) : null}
+          {error ? <span className="text-xs text-warn">{error}</span> : null}
+        </div>
+
+        {board ? (
+          <>
+            <p className="mt-3 text-xs text-muted">
+              Fitted on {board.split.n_train_rows.toLocaleString()} training rows and
+              scored on {board.split.n_test_rows.toLocaleString()}{" "}
+              <strong>held-out</strong> rows — the fold no transformer was fitted on.
+              Ranked by {primary}.
+            </p>
+
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-faint">
+                  <tr className="border-b border-line">
+                    <th className="py-1 pr-2 font-normal">#</th>
+                    <th className="py-1 pr-2 font-normal">Model</th>
+                    <th className="py-1 pr-2 text-right font-normal">{primary}</th>
+                    <th className="py-1 pr-2 text-right font-normal">
+                      {board.task.includes("class") ? "accuracy" : "mae"}
+                    </th>
+                    <th className="py-1 pr-2 text-right font-normal">
+                      {board.task.includes("class") ? "roc_auc" : "rmse"}
+                    </th>
+                    <th className="py-1 pr-2 text-right font-normal">rows used</th>
+                    <th className="py-1 pr-2 text-right font-normal">ms</th>
+                    <th className="py-1 font-normal">vs. baseline</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {board.models.map((row) => {
+                    const classification = board.task.includes("class");
+                    const second = classification ? "accuracy" : "mae";
+                    const third = classification ? "roc_auc" : "rmse";
+                    if (row.status !== "succeeded") {
+                      return (
+                        <tr key={row.family} className="border-b border-line/50 align-top">
+                          <td className="py-1 pr-2 text-faint">—</td>
+                          <td className="py-1 pr-2 font-sans text-muted">{row.label}</td>
+                          <td className="py-1 pr-2 font-sans text-warn" colSpan={6}>
+                            <Badge tone="warn">{row.status}</Badge>{" "}
+                            <span className="text-xs text-muted">{row.reason}</span>
+                          </td>
+                        </tr>
+                      );
+                    }
+                    const best = row.rank === 1;
+                    return (
+                      <tr
+                        key={row.family}
+                        className={`border-b border-line/50 ${best ? "bg-raised" : ""}`}
+                      >
+                        <td className="py-1 pr-2 text-faint">{row.rank}</td>
+                        <td className="py-1 pr-2 font-sans">
+                          {row.label}
+                          {best ? <span className="ml-2 text-accent">★ best</span> : null}
+                          {row.sampled ? (
+                            <span
+                              className="ml-2 text-[10px] text-warn"
+                              title={row.sampling_note}
+                            >
+                              sampled
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="py-1 pr-2 text-right">
+                          {metric(row.primary_metric_value)}
+                        </td>
+                        <td className="py-1 pr-2 text-right text-muted">
+                          {metric(row.metrics?.[second] as number | null)}
+                        </td>
+                        <td className="py-1 pr-2 text-right text-muted">
+                          {metric(row.metrics?.[third] as number | null)}
+                        </td>
+                        <td className="py-1 pr-2 text-right text-muted">
+                          {row.n_train_rows_used?.toLocaleString()}
+                        </td>
+                        <td className="py-1 pr-2 text-right text-faint">{row.train_ms}</td>
+                        <td className="py-1 font-sans">
+                          {row.beats_baseline === undefined ? (
+                            <span className="text-faint">—</span>
+                          ) : row.beats_baseline ? (
+                            <span className="text-good">
+                              +{metric(row.margin_over_baseline, 3)}
+                            </span>
+                          ) : (
+                            <span className="text-warn">
+                              no better ({metric(row.margin_over_baseline, 3)})
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              <div
+                title={`${board.baseline.estimator ?? "Dummy"} on the same held-out rows. A model that cannot beat this has learned nothing.`}
+              >
+                <Fact
+                  label="Trivial baseline"
+                  value={baselineValue === null ? "—" : metric(baselineValue)}
+                  mono
+                />
+              </div>
+              <div title={board.concurrency.note}>
+                <Fact
+                  label="Concurrency observed"
+                  value={`${board.concurrency.max_observed_overlap} of ${board.concurrency.workers} workers`}
+                  mono
+                />
+              </div>
+              <div
+                title={`${(board.concurrency.summed_model_ms / 1000).toFixed(2)}s of model time ran in ${(board.concurrency.wall_clock_ms / 1000).toFixed(2)}s.`}
+              >
+                <Fact
+                  label="Wall clock"
+                  value={`${(board.concurrency.wall_clock_ms / 1000).toFixed(2)}s · ${board.concurrency.speedup_vs_serial}× vs serial`}
+                  mono
+                />
+              </div>
+            </div>
+
+            {board.notes.map((note) => (
+              <p key={note} className="mt-2 text-xs text-warn">
+                {note}
+              </p>
+            ))}
+          </>
+        ) : busy ? null : (
+          <p className="mt-2 text-xs text-faint">
+            Nothing has been trained on this run yet.
+          </p>
+        )}
+      </div>
+
+      {/* ---- Stage 6: explain the winner ----------------------------------------- */}
+      {explanation && explanation.status === "succeeded" ? (
+        <div>
+          <PanelHeading>
+            {explanation.is_shap ? "SHAP explanation" : "Feature importance"}
+          </PanelHeading>
+          <p className="mt-1 text-xs text-muted">
+            <Badge tone={explanation.is_shap ? "good" : "warn"}>
+              {explanation.method_label}
+            </Badge>{" "}
+            for {explanation.label}. {explanation.sampling_note}
+          </p>
+          {explanation.fallback_reason ? (
+            <p className="mt-1 text-xs text-warn">{explanation.fallback_reason}</p>
+          ) : null}
+          <div className="mt-2">
+            <ImportanceChart features={explanation.features ?? []} />
+          </div>
+          <p className="mt-1 text-[10px] text-faint">
+            Mean absolute contribution per feature, across the sampled held-out rows.
+            Global importance only — no per-prediction breakdown is claimed.
+          </p>
+        </div>
+      ) : explanation && explanation.status !== "succeeded" ? (
+        <div>
+          <PanelHeading>Feature importance</PanelHeading>
+          <p className="mt-1 text-xs text-warn">{explanation.reason}</p>
+        </div>
+      ) : null}
+
+      {/* ---- Stage 7: what the history recommends -------------------------------- */}
+      {advice ? (
+        <div>
+          <PanelHeading>What similar datasets favoured</PanelHeading>
+          {advice.declined ? (
+            <div className="mt-2 rounded border border-warn/40 bg-warn/5 p-3">
+              <Badge tone="warn">incomplete</Badge>
+              <p className="mt-2 text-xs text-muted">
+                The recommender declined to rank:{" "}
+                {typeof advice.declined === "string"
+                  ? advice.declined
+                  : advice.declined.reason}
+              </p>
+              <p className="mt-1 text-xs text-faint">
+                This is a refusal, not a result — {advice.corpus.considered} comparable
+                experiments were available of {advice.corpus.stored} stored. Seed more of
+                the history and ask again.
+              </p>
+            </div>
+          ) : (
+            <>
+              <ul className="mt-2 space-y-1">
+                {advice.rationale.map((line) => (
+                  <li key={line} className="text-xs text-muted">
+                    • {line}
+                  </li>
+                ))}
+              </ul>
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-faint">
+                    <tr className="border-b border-line">
+                      <th className="py-1 pr-2 font-normal">Recommended</th>
+                      <th className="py-1 pr-2 text-right font-normal">score</th>
+                      <th className="py-1 pr-2 text-right font-normal">spread</th>
+                      <th className="py-1 font-normal">actually best here</th>
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono">
+                    {advice.ranking.map((row, index) => (
+                      <tr key={row.family} className="border-b border-line/50">
+                        <td className="py-1 pr-2 font-sans">
+                          {index + 1}. {row.label}
+                        </td>
+                        <td className="py-1 pr-2 text-right">{metric(row.score, 3)}</td>
+                        <td className="py-1 pr-2 text-right text-faint">
+                          {metric(row.spread, 3)}
+                        </td>
+                        <td className="py-1 font-sans">
+                          {board?.best_family === row.family ? (
+                            <span className="text-good">✓ it won</span>
+                          ) : (
+                            <span className="text-faint">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-2 text-[10px] text-faint">
+                Drawn from {advice.corpus.considered} comparable past experiments of{" "}
+                {advice.corpus.stored} stored. These are scores other datasets achieved,
+                not a forecast for this one.
+              </p>
+            </>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function RunReport({ run }: { run: Run }) {
   if (run.status === "failed") {
     return (
@@ -507,6 +903,11 @@ function RunReport({ run }: { run: Run }) {
         </div>
       ) : null}
 
+      {/* Stages 5-7 hang off the run, because they describe the data this run
+          prepared. Placed above the artifact list so that the two JSON files they
+          write appear in that list, already explained. */}
+      {run.status === "succeeded" ? <ModelsPanel run={run} /> : null}
+
       <div>
         <PanelHeading>What this run produced</PanelHeading>
         <div className="mt-2 flex flex-wrap gap-2">
@@ -519,6 +920,15 @@ function RunReport({ run }: { run: Run }) {
               {name}
             </a>
           ))}
+          {/* The archive is listed last and styled apart: it is the same bytes as the
+              links beside it, collected, and a reader should not wonder whether it is
+              an eighth artifact. */}
+          <a
+            href={api.bundleUrl(run.id)}
+            className="rounded border border-accent/50 bg-raised px-2 py-1 font-mono text-xs text-accent hover:border-accent"
+          >
+            ⤓ all of it (.zip)
+          </a>
         </div>
         {run.output_hash ? (
           <p className="mt-2 font-mono text-[10px] text-faint">
@@ -584,6 +994,24 @@ export function PlanReview({
         );
       } catch {
         setProfiles({});
+      }
+
+      // Restore the most recent successful run of *this* plan version, so a reload
+      // shows the results that already exist instead of an empty screen with a Run
+      // button. Scoped to the version on purpose: a run of version 1 does not describe
+      // the version 2 the reader is now looking at, and showing it under these columns
+      // would attribute one plan's results to another.
+      //
+      // A failure here is swallowed. The plan is the screen; past runs are a
+      // convenience, and losing them must not cost the review.
+      try {
+        const history = await api.listRuns(datasetId);
+        const previous = history.runs.find(
+          (one) => one.status === "succeeded" && one.plan_version === current.version,
+        );
+        if (previous) setRun(await api.readRun(previous.id));
+      } catch {
+        // No history, or it could not be read. The Run button still works.
       }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "The plan could not be loaded.");
