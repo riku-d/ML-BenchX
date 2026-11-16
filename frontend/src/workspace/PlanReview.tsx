@@ -22,7 +22,15 @@
  * stale, and the failure would be an action the backend rejects after the user chose it.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Component,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Bar,
   BarChart,
@@ -381,7 +389,9 @@ function ColumnRow({
                 <p className="mb-2 text-ui font-medium text-muted">
                   How the values are spread
                 </p>
-                <ColumnHistogram histogram={profile?.histogram} />
+                <ChartBoundary>
+                  <ColumnHistogram histogram={profile?.histogram} />
+                </ChartBoundary>
                 {scriptUrl && (
                   <a
                     href={scriptUrl}
@@ -402,6 +412,48 @@ function ColumnRow({
 }
 
 /** Everything the run measured about the split itself. */
+/**
+ * Keeps a failing chart from taking the page down with it.
+ *
+ * A chart is decoration around numbers that are already on screen in a table. When the
+ * charting library threw during render it unmounted the entire React tree and left a
+ * black page — the leaderboard, the run report and the download links all disappeared
+ * because a bar chart could not draw. Losing the drawing is acceptable; losing the
+ * results is not.
+ *
+ * A class component because that is the only thing React gives for catching a render
+ * error. It deliberately does not retry: if the library cannot load, re-rendering it
+ * produces the same throw.
+ */
+class ChartBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    // Kept visible in the console: the numbers are still on screen, so this would
+    // otherwise fail silently and nobody would know the chart was missing.
+    console.error("Chart failed to render; the figures above are unaffected.", error);
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <p className="text-xs text-faint">
+          The chart could not be drawn. The figures it would have shown are in the table
+          above.
+        </p>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 /** A metric's value, formatted, or a dash where there is genuinely no number. */
 function metric(value: number | null | undefined, digits = 4): string {
   return value === null || value === undefined || !Number.isFinite(value)
@@ -761,7 +813,9 @@ function ModelsPanel({
             <p className="mt-1 text-xs text-warn">{explanation.fallback_reason}</p>
           ) : null}
           <div className="mt-2">
-            <ImportanceChart features={explanation.features ?? []} />
+            <ChartBoundary>
+              <ImportanceChart features={explanation.features ?? []} />
+            </ChartBoundary>
           </div>
           <p className="mt-1 text-[10px] text-faint">
             Mean absolute contribution per feature, across the sampled held-out rows.
