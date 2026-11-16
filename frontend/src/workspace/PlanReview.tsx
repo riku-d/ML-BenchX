@@ -481,55 +481,93 @@ function ImportanceChart({
  * **A recommender that declines is reported as incomplete.** `declined` renders as a
  * warning, not as an empty ranking that would look like "no algorithm suits your data".
  */
-function ModelsPanel({ run }: { run: Run }) {
+function ModelsPanel({
+  run,
+  onRunPlan,
+}: {
+  /** `null` until the plan has been executed. The panel is shown either way. */
+  run: Run | null;
+  /** Executes the current plan and resolves to the run it produced. */
+  onRunPlan: () => Promise<Run | null>;
+}) {
   const [board, setBoard] = useState<Leaderboard | null>(null);
   const [explanation, setExplanation] = useState<Explanation | null>(null);
   const [advice, setAdvice] = useState<Recommendation | null>(null);
   const [busy, setBusy] = useState(false);
+  const [stage, setStage] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+
+  const runId = run?.status === "succeeded" ? run.id : null;
 
   // Results already stored are loaded rather than recomputed. Training is the expensive
   // step; a reload should not pay for it twice.
   const loadStored = useCallback(async () => {
+    if (!runId) return;
     const [models, explain] = await Promise.all([
-      api.readModels(run.id).catch(() => null),
-      api.readExplanation(run.id).catch(() => null),
+      api.readModels(runId).catch(() => null),
+      api.readExplanation(runId).catch(() => null),
     ]);
     if (models) setBoard(models);
     if (explain) setExplanation(explain);
-  }, [run.id]);
+  }, [runId]);
 
   useEffect(() => {
     void loadStored();
   }, [loadStored]);
 
   // The recommendation is independent of training — it describes the dataset, not the
-  // models — so it is fetched straight away.
+  // models — so it is fetched as soon as there is a run to describe.
   useEffect(() => {
+    if (!runId) return;
     let live = true;
     api
-      .recommendation(run.id)
+      .recommendation(runId)
       .then((value) => live && setAdvice(value))
       .catch(() => undefined);
     return () => {
       live = false;
     };
-  }, [run.id]);
+  }, [runId]);
 
+  /**
+   * Train, executing the plan first if that has not happened yet.
+   *
+   * Training needs a run, because it reads the run's stored train/test folds. Requiring
+   * the reader to find and press "Run this plan" first made the whole stage invisible on
+   * a freshly uploaded dataset — the button did not exist until a run did. One press now
+   * does both, and says which part it is on.
+   */
   const train = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      setBoard(await api.trainRun(run.id));
-      setExplanation(await api.readExplanation(run.id).catch(() => null));
+      let target = run;
+      if (!target || target.status !== "succeeded") {
+        setStage("Preparing the data…");
+        target = await onRunPlan();
+      }
+      if (!target || target.status !== "succeeded") {
+        setError(
+          "The plan could not be executed, so there is nothing to train on. The run's own error is shown above.",
+        );
+        return;
+      }
+      setStage("Fitting six models…");
+      setBoard(await api.trainRun(target.id));
+      setExplanation(await api.readExplanation(target.id).catch(() => null));
+      api
+        .recommendation(target.id)
+        .then(setAdvice)
+        .catch(() => undefined);
     } catch (exc) {
       setError(
         exc instanceof ApiError ? exc.message : "Training failed before it could report.",
       );
     } finally {
       setBusy(false);
+      setStage("");
     }
-  }, [run.id]);
+  }, [run, onRunPlan]);
 
   const primary = board?.primary_metric ?? "";
   const baselineValue =
@@ -544,16 +582,24 @@ function ModelsPanel({ run }: { run: Run }) {
         <PanelHeading>Six candidate models</PanelHeading>
         <div className="mt-2 flex flex-wrap items-center gap-3">
           <Button onClick={train} disabled={busy}>
-            {busy ? "Training…" : board ? "Train again" : "Train six models"}
+            {busy ? "Working…" : board ? "Train again" : "Train six models"}
           </Button>
           {busy ? (
             <span className="flex items-center gap-2 text-xs text-muted">
-              <Spinner /> Fitting six families on {run.split.train_rows.toLocaleString()}{" "}
-              training rows, three at a time.
+              <Spinner /> {stage}
+              {run
+                ? ` Six families on ${run.split.train_rows.toLocaleString()} training rows, three at a time.`
+                : " The plan runs first, then six families train on its training rows, three at a time."}
             </span>
           ) : null}
           {error ? <span className="text-xs text-warn">{error}</span> : null}
         </div>
+        {!run && !busy ? (
+          <p className="mt-2 text-xs text-faint">
+            This plan has not been executed yet. Training will run it first — or press
+            “Run this plan” above to review the split and the checks before training.
+          </p>
+        ) : null}
 
         {board ? (
           <>
@@ -910,11 +956,6 @@ function RunReport({ run }: { run: Run }) {
         </div>
       ) : null}
 
-      {/* Stages 5-7 hang off the run, because they describe the data this run
-          prepared. Placed above the artifact list so that the two JSON files they
-          write appear in that list, already explained. */}
-      {run.status === "succeeded" ? <ModelsPanel run={run} /> : null}
-
       <div>
         <PanelHeading>What this run produced</PanelHeading>
         <div className="mt-2 flex flex-wrap gap-2">
@@ -1059,15 +1100,18 @@ export function PlanReview({
     }
   }, [edits, pendingCount, plan]);
 
-  const execute = useCallback(async () => {
-    if (!plan) return;
+  const execute = useCallback(async (): Promise<Run | null> => {
+    if (!plan) return null;
     setConfirmRun(false);
     setBusy("running");
     setError(null);
     try {
-      setRun(await api.runPlan(plan.id));
+      const next = await api.runPlan(plan.id);
+      setRun(next);
+      return next;
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "The run could not be started.");
+      return null;
     } finally {
       setBusy(null);
     }
@@ -1230,6 +1274,14 @@ export function PlanReview({
             </div>
           </section>
         ) : null}
+
+        {/* Stages 5-7. Rendered whether or not a run exists yet: training needs a run,
+            but requiring the reader to produce one first made the entire stage
+            invisible on a freshly uploaded dataset. The panel executes the plan itself
+            when there is nothing to train on. */}
+        <section>
+          <ModelsPanel run={run} onRunPlan={execute} />
+        </section>
       </main>
 
       <Dialog
