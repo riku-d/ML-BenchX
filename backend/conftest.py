@@ -27,7 +27,18 @@ _SANDBOX = Path(tempfile.mkdtemp(prefix="mlbenchx-tests-"))
 
 import os  # noqa: E402 - must follow the sandbox, precede any app import
 
-os.environ["MLBENCHX_DATABASE_URL"] = f"sqlite:///{_SANDBOX / 'test.db'}"
+# The suite runs against SQLite by default and against PostgreSQL when asked to, because
+# the two are not interchangeable in the ways that bite: server-side defaults, JSON
+# column types, timezone-aware timestamps and transactional DDL all differ. Stage 4's
+# experiment history is specified to live on PostgreSQL, so "it passes on SQLite" stopped
+# being enough.
+#
+# A separate variable rather than reusing MLBENCHX_DATABASE_URL on purpose: the suite
+# drops and recreates every table between tests, and a developer who had exported the
+# normal variable to point at their working database would lose it.
+os.environ["MLBENCHX_DATABASE_URL"] = os.environ.get(
+    "MLBENCHX_TEST_DATABASE_URL"
+) or f"sqlite:///{_SANDBOX / 'test.db'}"
 os.environ["MLBENCHX_STORAGE_ROOT"] = str(_SANDBOX / "storage")
 
 from app.db import Base, engine, init_db  # noqa: E402

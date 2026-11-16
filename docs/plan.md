@@ -4,7 +4,22 @@ Transparent AutoML for tabular data. Upload → profile → review and override 
 preprocessing plan → execute → see every transformation explained → download artifacts.
 
 Requirements and acceptance criteria: [PRD.md](PRD.md). Technical design:
-[Design.md](Design.md). Status, evidence and defects: [AUDIT.md](AUDIT.md).
+[Design.md](Design.md). Status, evidence and defects: [AUDIT.md](AUDIT.md). What the
+product is for, and what is committed: [PRODUCT.md](PRODUCT.md).
+
+**Direction and schedule come from outside this repository.** The **Institute Seed Grant
+proposal** (PI Deblina Chowdhury, Heritage Institute of Technology — ₹60,800 sanctioned
+against its objectives, four-quarter work plan and budget) and the **Project I semester
+report** `DSC3295-23-27-T15_Sem;colon_report1.pdf` govern scope; where a file here
+contradicted them, the file was corrected. Delivery and cost by month:
+[EXECUTION_PLAN_OCT26_MAR27.md](EXECUTION_PLAN_OCT26_MAR27.md).
+
+| Quarter | Months | Focus | Objective |
+|---|---|---|---|
+| Q1 | Oct–Dec 26 | Environment setup & glass-box preprocessing | 1 |
+| Q2 | Jan–Mar 27 | Meta-learning engine & parallel model training | 2 & 3 |
+| Q3 | Apr–Jun 27 | Multi-user collaboration & integration | 4 |
+| Q4 | Jul–Sep 27 | SMART KPI validation, hardening & release | 5 |
 
 Verification evidence — commands run, actual results, coverage, and known limitations —
 is in [AUDIT.md](AUDIT.md) §5, with the test and acceptance plan it satisfies in
@@ -47,3 +62,6 @@ cd frontend && npm run dev
   fitting. See [Design.md](Design.md) §7 and `backend/tests/test_leakage.py`.
 - No stubs, TODOs or mocked results. If something cannot be done, it is stated rather
   than faked.
+- A funded commitment is written with its quarter and never in the present tense. Nothing
+  from Stages 4–7 — meta-learning, training, SHAP, the leaderboard, accounts — may be
+  described as existing until it does.

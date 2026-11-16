@@ -27,6 +27,9 @@ __all__ = [
     "MAX_UPLOAD_BYTES",
     "MIN_ROWS",
     "UPLOAD_CHUNK_BYTES",
+    "MISSING_MARKERS",
+    "MISSING_WORDS",
+    "PLACEHOLDER_WORD_MAX_SHARE",
     "MISSING_TOKENS",
     "DATE_PARSE_RATE",
     "NEAR_CONSTANT_SHARE",
@@ -72,6 +75,10 @@ __all__ = [
     "EXECUTION_MAX_OUTPUT_BYTES",
     "PREVIEW_PAGE_SIZE",
     "MAX_HISTORY_ENTRIES",
+    "K_NEIGHBOURS",
+    "MIN_CORPUS",
+    "MIN_SIMILARITY",
+    "SCALER_CLIP",
     "STRIP_WIDTH",
     "MAX_COLUMNS_IN_EXPLANATION",
 ]
@@ -117,13 +124,70 @@ DATE_PARSE_RATE = _float("DATE_PARSE_RATE", 0.90)
 #: carries almost nothing and costs a column's width and the reader's attention.
 NEAR_CONSTANT_SHARE = _float("NEAR_CONSTANT_SHARE", 0.99)
 
-#: Strings people type when they mean "no value". Compared case-insensitively after
-#: stripping surrounding whitespace.
-MISSING_TOKENS: frozenset[str] = frozenset({
-    "", "-", "--", "?", "n/a", "na", "n.a.", "nan", "none", "null", "nil",
-    "unknown", "not available", "not applicable", "missing", "#n/a", "#na",
-    "#value!", "#div/0!", "tbd", "no data", ".",
+#: Notations that mean "no value" wherever they appear, however often they appear.
+#: None of these is a word or a symbol anybody would choose as a label: they are the
+#: marks a person or a program leaves where a value is absent — an empty cell, ARFF's
+#: ``?``, SQL's ``null``, the float repr ``nan``, Excel's error cells. A column that is
+#: 90% ``?`` really is 90% empty, so no frequency test applies to this set.
+#: Compared case-insensitively after stripping surrounding whitespace.
+#:
+#: A single ``-`` is deliberately **not** here, though it reads like one of these. See
+#: ``MISSING_WORDS``.
+MISSING_MARKERS: frozenset[str] = frozenset({
+    "", "--", ".", "?", "n/a", "n.a.", "#n/a", "#na", "nan", "null",
+    "#value!", "#div/0!",
 })
+
+#: Ordinary words that *sometimes* mean "no value" and sometimes are the answer.
+#:
+#: Treating these as blanks unconditionally destroys real data, and does it silently.
+#: The case that found this: OpenML's ``credit-g`` has 1,000 rows and not one missing
+#: value. Its ``own_telephone`` column holds ``none`` 596 times and ``yes`` 404 times —
+#: a balanced, informative binary feature whose negative class is spelled "none".
+#: Blanking it made the column 60% empty, which dropped it; ``other_parties`` and
+#: ``other_payment_plans`` went the same way. The app then reported "2 columns are more
+#: than 60% empty" and "11.0% of all cells are blank" about a file with no blanks in it.
+#:
+#: So a word from this set is read as a gap only when it is a small share of what is
+#: written in its column — see ``PLACEHOLDER_WORD_MAX_SHARE``. A typed-in placeholder is
+#: incidental by nature; a level of a variable is not.
+#:
+#: ``-`` is in here, not in ``MISSING_MARKERS``, and that was not the first guess. A bare
+#: dash looks like pure notation, and in a spreadsheet it usually is. But OpenML's
+#: ``credit-approval`` — a standard benchmark — encodes its binary target as ``-`` (383)
+#: and ``+`` (307). Blanking the dash emptied the target on 55% of rows, those rows were
+#: then dropped for having no label, and what survived was a *constant* target that the
+#: pipeline went on to describe as a multiclass task whose majority-class baseline scored
+#: 1.0000. A frequency test gets both readings right: a dash holding half a column is
+#: that column's negative class, and a dash in 3% of one is an empty cell.
+MISSING_WORDS: frozenset[str] = frozenset({
+    "-", "none", "unknown", "na", "nil", "missing", "no data", "not available",
+    "not applicable", "tbd",
+})
+
+#: Share of a column's written values above which a word from ``MISSING_WORDS`` is read
+#: as a category level rather than a gap.
+#:
+#: Measured against the non-blank values — what somebody actually typed in that column —
+#: because that is what a placeholder competes with to be a level, and because it makes
+#: the rule independent of how many entirely blank rows the file has.
+#:
+#: A fifth of a column is the line because of what sits on either side of it:
+#: ``MISSING_INDICATOR_RATE`` (5%) is the point at which missingness is itself worth
+#: modelling, and ``MAX_MISSING_RATE`` (60%) is the point at which a column is dropped
+#: altogether. The damage this prevents is all at the top of that range, and a word
+#: accounting for more than a fifth of a column is doing work in it.
+#:
+#: This is a rate over the whole file, like ``DATE_PARSE_RATE``, and for the same
+#: reason: deciding whether a string is data or the absence of data is a parsing
+#: question, not a value learned from the data and applied to rows. No target is
+#: consulted and nothing is fitted.
+PLACEHOLDER_WORD_MAX_SHARE = _float("PLACEHOLDER_WORD_MAX_SHARE", 0.20)
+
+#: Every string recognised as a possible blank. The two sets above decide *how* each one
+#: is applied; this is the vocabulary, and exists so that a caller needing one list — the
+#: exported script, mainly — has one.
+MISSING_TOKENS: frozenset[str] = MISSING_MARKERS | MISSING_WORDS
 
 
 # --------------------------------------------------------------------------------------
@@ -360,6 +424,43 @@ STORAGE_ROOT = Path(_str("STORAGE_ROOT", str(_BACKEND_ROOT / "storage")))
 #: How many analysed runs to keep hot in memory. The database is the source of truth;
 #: this only avoids re-reading and re-fitting for the run the user is looking at.
 MAX_RUNS_IN_MEMORY = _int("MAX_RUNS_IN_MEMORY", 20)
+
+
+# --------------------------------------------------------------------------------------
+# Stage 4 — meta-learning
+# --------------------------------------------------------------------------------------
+
+#: How many past experiments inform one recommendation. Five is small enough that every
+#: neighbour can be named in the rationale — a ranking the user cannot audit is the
+#: thing this product exists not to produce — and large enough that one unusual dataset
+#: cannot decide the answer on its own.
+K_NEIGHBOURS = _int("K_NEIGHBOURS", 5)
+
+#: Below this many usable records, no recommendation is offered at all.
+#:
+#: Not a tuning knob. With three records a "top-ranked family" is the winner of a field
+#: of three, dressed as a finding. Declining is the honest output, and the engine says
+#: why rather than returning an empty list.
+MIN_CORPUS = _int("MIN_CORPUS", 8)
+
+#: Scaled coordinates are clipped to ±this before any distance is measured.
+#:
+#: Not an independent choice. Each coordinate is divided by its observed range across the
+#: corpus, so every record the scaler was fitted on lands within ±1 of the median on
+#: every coordinate — the bound is arithmetic. The clip therefore does exactly one thing:
+#: it bounds a *query* whose value falls outside everything the corpus has seen, which
+#: the divisor cannot help with because it is fitted on the corpus alone.
+#:
+#: That case is real and not rare. A dataset with 11 classes queried against a corpus
+#: whose records have 2 to 5 sits far outside on that coordinate; unclipped it is
+#: described almost entirely by it. Clipping says "outside anything comparable", which is
+#: true, instead of letting one axis decide what the dataset resembles.
+SCALER_CLIP = _float("SCALER_CLIP", 1.0)
+
+#: Cosine similarity, after scaling, below which the corpus is treated as having
+#: nothing to say about this dataset. Neighbours still get reported; the ranking does
+#: not, because extrapolating from datasets that look nothing like yours is guessing.
+MIN_SIMILARITY = _float("MIN_SIMILARITY", 0.30)
 
 
 # --------------------------------------------------------------------------------------

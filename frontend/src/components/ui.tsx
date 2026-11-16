@@ -8,7 +8,7 @@
  * central interaction of this product unavailable to some of the people using it.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
@@ -614,5 +614,134 @@ export function Disclosure({
       </summary>
       <div className="fade mt-2">{children}</div>
     </details>
+  );
+}
+
+// ---------------------------------------------------------------------------------
+// Tooltip
+// ---------------------------------------------------------------------------------
+
+/**
+ * A tooltip that a keyboard and a touchscreen can both reach.
+ *
+ * This replaces the `title` attribute, which the application was leaning on heavily —
+ * 359 of them on the workspace alone. `title` never appears on touch, is not reachable
+ * by keyboard in most browsers, has a delay no one can override, cannot be styled, and
+ * is announced inconsistently by screen readers. Several of this product's explanations
+ * lived nowhere else: the status dot's three-way meaning, and the reason a download was
+ * greyed out, were both `title`-only.
+ *
+ * So: hover opens it, focus opens it, tap toggles it, Escape and blur close it, and the
+ * content is wired to the trigger with `aria-describedby` so it is read out as the
+ * description of the thing it describes rather than as loose text.
+ *
+ * Rendered through a portal and positioned from the trigger's rect, because the panels
+ * this sits inside are all `overflow-y-auto` and would otherwise clip it. Position is
+ * clamped to the viewport so a tooltip on a column at the right-hand edge of the data
+ * table stays on screen.
+ */
+export function Tooltip({
+  content,
+  children,
+  placement = "top",
+}: {
+  content: ReactNode;
+  children: ReactNode;
+  placement?: "top" | "bottom";
+}) {
+  const [open, setOpen] = useState(false);
+  const [box, setBox] = useState<{ left: number; top: number } | null>(null);
+  const triggerRef = useRef<HTMLSpanElement>(null);
+  const bubbleRef = useRef<HTMLDivElement>(null);
+  const id = useId();
+
+  const place = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    // Measured if it has rendered, estimated on the first frame; the effect below
+    // re-runs once the bubble exists, so the estimate is never what the user sees.
+    const bubble = bubbleRef.current?.getBoundingClientRect();
+    const width = bubble?.width ?? 260;
+    const height = bubble?.height ?? 64;
+
+    const left = Math.min(
+      Math.max(8, rect.left + rect.width / 2 - width / 2),
+      window.innerWidth - width - 8,
+    );
+    const above = placement === "top" && rect.top > height + 12;
+    const top = above ? rect.top - height - 8 : rect.bottom + 8;
+    setBox({ left, top });
+  }, [placement]);
+
+  useEffect(() => {
+    if (!open) return;
+    place();
+    // A second pass once the bubble has a real size, so the first paint is not the
+    // estimate. Cheap, and avoids the tooltip visibly jumping into place.
+    const frame = requestAnimationFrame(place);
+
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    const onScroll = () => setOpen(false);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [open, place]);
+
+  return (
+    <>
+      <span
+        ref={triggerRef}
+        tabIndex={0}
+        role="button"
+        aria-describedby={open ? id : undefined}
+        aria-expanded={open}
+        className="cursor-help rounded-sm underline decoration-dotted decoration-from-font underline-offset-2"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onClick={(event) => {
+          // Touch has no hover, so a tap has to open it. Opening rather than toggling:
+          // with a mouse the pointer is already inside, so `onMouseEnter` has opened it
+          // and a toggle here would close it on the first click — hovering a term and
+          // then clicking it would dismiss the definition. Closing is handled by
+          // leaving, blurring, Escape and scrolling, all of which a tap elsewhere does.
+          event.stopPropagation();
+          setOpen(true);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((was) => !was);
+          }
+        }}
+      >
+        {children}
+      </span>
+      {open &&
+        box &&
+        createPortal(
+          <div
+            ref={bubbleRef}
+            id={id}
+            role="tooltip"
+            style={{ left: box.left, top: box.top }}
+            className="fade pointer-events-none fixed z-[60] max-w-[280px] rounded-lg border
+              border-line-strong bg-raised px-3 py-2 text-meta leading-relaxed text-text shadow-2xl"
+          >
+            {content}
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }

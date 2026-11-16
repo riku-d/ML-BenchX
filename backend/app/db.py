@@ -74,6 +74,7 @@ __all__ = [
     "Workspace",
     "Compilation",
     "HistoryEntry",
+    "ExperimentRecord",
     "engine",
     "SessionLocal",
     "session_scope",
@@ -501,3 +502,81 @@ class Run(TimestampedProjectMixin, Base):
 
     dataset: Mapped[Dataset] = relationship()
     plan: Mapped[Plan] = relationship(back_populates="runs")
+
+
+class ExperimentRecord(TimestampedProjectMixin, Base):
+    """One past experiment: what a dataset looked like, and which family won on it.
+
+    This is Stage 4's experiment history — the corpus a new dataset is compared against.
+    A record is not a run of this product's UI: most of them come from the offline
+    corpus builder, which fetches a public dataset, prepares it through Stages 1-3 and
+    cross-validates the candidate families to find out which actually won. The label is
+    measured, not asserted.
+
+    Three choices here are load-bearing.
+
+    **The meta-features are stored twice.** The eight named in PRD.md §10 are real
+    columns, because a meta-learner filters and sorts on them and because the
+    convention stated at the top of this module is that anything worth querying is
+    promoted. The full vector, including the derived features, is also kept whole in
+    ``meta_features`` so that adding a fifteenth feature is a backfill rather than a
+    migration.
+
+    **Every family's score is kept, not just the winner's.** A corpus of winners cannot
+    tell "Random Forest won by a mile" from "Random Forest won by 0.001", and the second
+    should never produce a confident recommendation.
+
+    **``holdout`` exists so the KPI can be honest.** NFR-018 measures the engine on
+    datasets that never seeded it. The similarity search filters these out, and a test
+    asserts that a holdout record can never be returned as a neighbour. Without the
+    flag the KPI would be measured on the records that produced the answer, which is
+    not a measurement of anything.
+    """
+
+    __tablename__ = "experiment_records"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+    #: ``openml`` for a seeded record, ``local`` for one grown from a real run here.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="openml")
+    #: The OpenML data id, or the run id for a local record. Together with ``source``
+    #: this is what makes the builder resumable without re-fetching.
+    source_ref: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    dataset_name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    target: Mapped[str] = mapped_column(String(255), nullable=False)
+    task: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+
+    #: Vectors stamped with a different version are never compared — see
+    #: ``services/metafeatures.py``. Indexed because every search filters on it.
+    metafeature_version: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+
+    #: The eight from PRD.md §10, promoted so a search is a query rather than a scan.
+    n_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_cols: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_numerical: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    n_categorical: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sparsity: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    imbalance_ratio: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    mean_abs_correlation: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    n_classes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    #: The whole vector, derived features included.
+    meta_features: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    #: The label, and the evidence for it.
+    best_family: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    family_scores: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metric: Mapped[str] = mapped_column(String(32), nullable=False, default="accuracy")
+    folds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    training_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    #: Reserved for evaluation. Never returned by the similarity search.
+    holdout: Mapped[bool] = mapped_column(Boolean, index=True, nullable=False, default=False)
+
+    __table_args__ = (
+        #: One record per dataset per source. Re-seeding is an update, not a duplicate
+        #: that would let one dataset vote several times in a KNN.
+        UniqueConstraint("source", "source_ref", name="uq_experiment_source_ref"),
+    )

@@ -1,7 +1,21 @@
 # ML-BenchX — Product Requirements
 
-**Version 1.1 · 30 October 2026 · current release target: Stages 1–3, plus the
-reviewable plan and the durable run**
+**Version 1.2 · 31 October 2026 · current release target: Stages 1–3, plus the
+reviewable plan and the durable run. Reconciled against the governing documents.**
+
+> **Governing documents.** Direction, scope and schedule are set by the **Institute Seed
+> Grant proposal** (PI Deblina Chowdhury, Heritage Institute of Technology — ₹60,800
+> sanctioned against its §4 objectives, four-quarter work plan and §9 budget) and the
+> **Project I semester report** `DSC3295-23-27-T15_Sem;colon_report1.pdf`. Where this
+> document contradicted them it has been corrected, not the other way round. This file
+> remains the authority on *what is required and whether it is met*; it is not the
+> authority on *what the product is for or when it ships*. Month-by-month delivery and
+> cost: [EXECUTION_PLAN_OCT26_MAR27.md](EXECUTION_PLAN_OCT26_MAR27.md).
+>
+> The funded year runs October 2026 to September 2027: **Q1** Oct–Dec (environment setup
+> and glass-box preprocessing, Objective 1), **Q2** Jan–Mar (meta-learning and parallel
+> training, Objectives 2–3), **Q3** Apr–Jun (multi-user collaboration, Objective 4),
+> **Q4** Jul–Sep (SMART KPI validation, hardening and release, Objective 5).
 
 This document describes what ML-BenchX is for, what it is required to do, and how each
 requirement is verified. It is grounded in the repository as it stands at the time of
@@ -37,8 +51,9 @@ any of it, and compiles a model-ready train/test split together with the Python 
 produced it.
 
 The long-term product is a seven-stage automated benchmarking platform (§10). **This
-release covers Stages 1–3 only.** Stages 4–7 — meta-learning, parallel training,
-explainability, leaderboards — are not implemented and are not in scope.
+release covers Stages 1–3 only** — Stages 4–7 are not implemented and are not in scope
+*for this release*. They are, however, funded and scheduled across Q2 to Q4 of the
+sanctioned work plan, so §10 is a commitment with dates rather than an aspiration.
 
 ### 1.2 Problem statement
 
@@ -60,6 +75,14 @@ whether the score they are shown is honest. Two failures follow from that opacit
 | **Analyst with a spreadsheet** | To find out whether their file is usable before investing in modelling, in language that is not about dtypes |
 | **ML engineer** | A reproducible, inspectable preprocessing artefact — code and a fitted pipeline — they can lift into their own project |
 | **Reviewer / instructor** | Evidence that the leakage guarantee holds, not an assertion that it does |
+
+The governing documents name five beneficiary groups, which refine rather than replace the
+table above: data analysts and students (the primary audience); academic researchers in
+economics, biology, healthcare and the social sciences; small and medium businesses without
+an MLOps team; and — secondary — educators and trainers, and citizen data scientists in
+finance, marketing or HR. The survey behind them is real evidence: **N = 58**, with 82.6 %
+reporting confusion in model selection, 95.6 % wanting every preprocessing step visible,
+and 43.5 % distrusting tools that hide preprocessing decisions (report §1.3.1).
 
 ### 1.4 Value proposition
 
@@ -150,11 +173,27 @@ screen, missing-indicator columns, rare-category grouping, Yeo-Johnson skew corr
 the versioned run with `plan.json` / `schema.json` / `log.json` / train and test parquet,
 and `DELETE /api/datasets/{id}`. See §3.4 and AUDIT.md §8.
 
-### 2.5 Explicitly out of scope for this release
+### 2.5 Out of scope for this release — deferred, with dates
 
-Model training, hyperparameter tuning, SHAP or any other explainability of a *model*,
-leaderboards, PDF reports, Celery, PostgreSQL, authentication, multi-user projects,
-streaming ingestion, and datasets larger than the 50 MB upload cap.
+Not in this release, and each now carries a sanctioned quarter rather than an open
+question. Nothing below may be described as existing until it does.
+
+| Deferred | Objective | Lands |
+|---|---|---|
+| PostgreSQL and object storage (R2) as the stores | 1 | Nov-26 |
+| Containerised execution sandbox (Linux) | 1 | Nov-26 |
+| Natural-language goal interface (Gemini Flash-Lite, metadata only) | 1 | Dec-26 |
+| Polynomial features with VIF filtering, PCA, cyclical datetime encoding | 1 | Dec-26 |
+| Meta-learning: meta-features, experiment history, cosine/KNN ranking | 2 | Jan-27 |
+| Model training — Celery, Redis, six algorithms, WebSocket status | 3 | Feb-27 |
+| SHAP explainability of a model; ranked leaderboard | 3 | Mar-27 |
+| Authentication, four roles, multi-user projects, PDF report export | 4 | Q3, Apr–Jun 27 |
+
+**Out of scope throughout the funded year**, per the proposal and report §2.2:
+unstructured data (images, audio, video, free text), deep learning, time-series
+forecasting, streaming or real-time ingestion, **automated hyperparameter optimisation**,
+edge deployment, integration with Snowflake or BigQuery, and datasets larger than the
+50 MB upload cap.
 
 ---
 
@@ -182,7 +221,7 @@ Status is as audited on 30 October 2026 and matches AUDIT.md.
 | FR-ING-011 | Detect a headerless file | P1 | A file whose first row is data is identified rather than silently promoting that row to column names | I `ingest._looks_headerless` | Met |
 | FR-ING-012 | Tidy and disambiguate column headings | P1 | Whitespace is stripped; a heading used twice is made unique; the original → cleaned mapping is retained and reported | T fixture `unicode_duplicate_headers.csv` | Met |
 | FR-ING-013 | Infer column types | P0 | Each column is classified numeric, categorical, datetime, text or constant, and the classification drives routing | T `test_glassbox.py::profile_frame` tests | Met |
-| FR-ING-014 | Recognise text that means "missing" | P0 | `N/A`, `-`, `unknown`, `nil` and the rest of `MISSING_TOKENS` become real blanks, and the count is reported | T `test_app.py` | Met |
+| FR-ING-014 | Recognise text that means "missing" | P0 | `MISSING_MARKERS` (`N/A`, `?`, `null`, `nan`…) always become real blanks. `MISSING_WORDS` (`-`, `none`, `unknown`, `nil`…) do so only below `PLACEHOLDER_WORD_MAX_SHARE` of a column's written values — above it the word is that column's category level, not a gap. Both the conversions and the words left in place are reported | T `test_placeholders.py` | Met — rule revised 16 Nov, STAGE4_PLAN.md §11a |
 | FR-ING-015 | Convert numbers stored as text | P0 | `1,234`, `$5`, `12%` convert to numbers, but only when *every* non-blank value in the column converts | T `test_rules.py`; fixture `messy_types.csv` | Met. `12%` → `12`, not `0.12` — documented, not corrected |
 | FR-ING-016 | Convert dates stored as text | P0 | A column whose values carry a four-digit year and parse at a rate of at least `DATE_PARSE_RATE` (90%) becomes datetime; unparsed values become blanks and are reported | T `test_rules.py` | Met |
 | FR-ING-017 | Recognise true/false columns | P1 | `yes/no`, `y/n`, `true/false` become a boolean column rather than staying text | T `test_rules.py` | Met |
@@ -301,6 +340,10 @@ Design in [Design.md](Design.md) §12; verification in [AUDIT.md](AUDIT.md) §8.
 | NFR-014 | Performance | A 10 MB file completes ingestion, profiling and preprocessing within an interactive wait | `tests/test_performance.py` — budgets scaled by a calibration workload, plus a machine-independent scaling check | **Met.** Measured 1.92 s total against an 8 s budget |
 | NFR-015 | Memory | The upload cap bounds the frame size; the sandbox has a memory watchdog at `EXECUTION_MEMORY_BYTES` (2 GB) | `executor.py`; `test_executor.py` | Met for executed code; no measured ceiling for the API process |
 | NFR-016 | Accessibility | `prefers-reduced-motion` is honoured; the layout is verified at 375, 768 and 1440 px with no horizontal overflow | Manual, per README | Claimed; not automatically tested |
+| NFR-018 | Meta-learning accuracy | The recommendation engine identifies the best-performing algorithm family on ≥ 80 % of unseen UCI/Kaggle benchmark datasets. The evaluation subset must be held out of the seeded corpus, never scored on records that seeded it | Benchmark harness over the held-out subset | **Not yet applicable.** Engine lands Jan-27; first reading Mar-27; formal validation Q4 |
+| NFR-019 | End-to-end latency | Upload → profiling → preprocessing → training of six models → SHAP completes within **3 minutes** for a 10 MB dataset of ~50 columns | Extends `tests/test_performance.py` once Stage 5 exists | **Not yet applicable.** Ingest → preprocess is already 1.92 s of the budget (NFR-014); first full reading Mar-27 |
+| NFR-020 | Concurrency stability | The task queue sustains ≥ 5 simultaneous training sessions with no crashes and no failed tasks | Load test against the deployed worker tier | **Not yet applicable.** Bounded queue lands Feb-27; validation Q4 |
+| NFR-021 | Model validity | Generated models score within 5 % F1 of hand-written scikit-learn baselines on the same split | Comparison harness over the existing sanity baseline | **Not yet applicable.** Lands with Stage 5; first reading Mar-27 |
 | NFR-017 | Browser reachability | Every HTTP method the API routes must survive a CORS preflight from the development origin, and no other origin may be allowed. The interface and the API are different origins in development, so a method the policy omits is not a stricter policy — it is a route the product cannot use | `test_api.py::test_every_method_the_api_uses_survives_a_preflight` (parametrised from the OpenAPI document), `test_an_origin_the_app_does_not_serve_is_still_refused` | **Met — fixed in this audit.** `PUT` was omitted while two workspace routes used it |
 
 ---
@@ -565,31 +608,45 @@ cd backend && ../.venv/bin/python -m alembic upgrade head # schema from empty
 | R2 | **Numerical behaviour is pinned to exact library versions** | `requirements.txt` pins `pandas==2.3.3`, `scikit-learn==1.8.0` and the rest exactly, with the reasoning stated | A minor release can move a quantile or a cross-fitting detail and falsify the determinism claim | Exact pins; the determinism test fails loudly if it moves |
 | R3 | **Dead code carrying real features.** `app/plan.py` and `app/runner.py` implement missing-indicator columns and rare-category grouping, and nothing imports them | `.coveragerc` omits both and documents why | A reader believes those features exist | Documented in the audit; wire in or delete — a direction decision, not a defect |
 | R4 | **The UI does not show what the engine detects** | `warnings`/`checks` now returned; no frontend caller | A drifted split or a weak baseline is computed and never seen | API contract in place; rendering is tracked as a P2 gap |
-| R5 | **Single-process, synchronous compile** | By design, per README | A large file blocks a request | The upload cap bounds it; a queue is deliberately out of scope |
-| R6 | **Sandbox strength is platform-dependent** | `sandbox-exec` is macOS-only | On Linux only process limits apply | The active layer is reported in the UI; the production answer is a container with no network namespace |
-| R7 | **No authentication; `project_id` is always `"default"`** | `db.py` | Not multi-user | Deliberate. The column exists so accounts are a migration, not a redesign |
+| R5 | **Single-process, synchronous compile** | By design, per README | A large file blocks a request | The upload cap bounds it today. A queue is no longer out of scope: Celery over Redis is Objective 3, Feb-27, with a bounded per-session concurrency limit |
+| R6 | **Sandbox strength is platform-dependent** | `sandbox-exec` is macOS-only | On Linux only process limits apply | The active layer is reported in the UI. The funded deployment is public and runs Linux, so the container with no network namespace is **a precondition for provisioning any server** (Nov-26), not a later hardening step |
+| R7 | **No authentication; `project_id` is always `"default"`** | `db.py` | Not multi-user | Deliberate *for now*. Role-based access control across Admin, Data Scientist, Collaborator and Viewer is Objective 4, Q3. The column exists so accounts are a migration, not a redesign; no work in Q1 or Q2 may foreclose them |
 | R8 | **`12%` ingests as `12`, not `0.12`** | `ingest._NUMERIC_NOISE` strips `%` | A percentage column is scaled 100× | Documented here and in the audit; changing it silently rescales existing users' data |
+| R9 | **The governing documents specify target encoding for high-cardinality columns** | Proposal §methodology; report §4.2.1 | A reader implements the leaking variant to match the prose | The code is right and the documents are wrong. `FrequencyEncoder` is the default because it never reads the target; sklearn's `TargetEncoder` is offered and cross-fits. Correct Report 2; do not change the default |
+| R10 | **No `LICENSE` file** | Repository root | Q4 commits to a GitHub open-source release and the proposal sells "free and open-source" as a differentiator | Settle the licence in Q1, including any institute IP constraint, rather than in July |
 
-**Assumptions.** Single user, local machine, files under 50 MB, tabular data with a
-header row, and a target the user can name or describe.
+**Assumptions.** Files under 50 MB, tabular data with a header row, and a target the user
+can name or describe. Single user on a local machine holds until Q3, when the deployed
+multi-user instance supersedes it; it is an assumption with an expiry date, not a property
+of the product.
 
 ---
 
-## 10. Future roadmap — Stages 4–7
+## 10. Roadmap — Stages 4–7, as sanctioned
 
-**None of the following is implemented.** No Celery, no PostgreSQL experiment history,
-no SHAP, no model training and no leaderboard exists in this repository. The
-architecture diagram shows the intended product, not the current one.
+**None of the following is implemented.** No Celery, no Redis, no PostgreSQL experiment
+history, no SHAP, no model training and no leaderboard exists in this repository, and
+nothing here may be written up as though it does. What has changed since version 1.1 is
+that these are no longer speculative: they are the funded objectives of the seed grant,
+each with a quarter and a budgeted machine.
 
-| Stage | Capability | Depends on |
-|---|---|---|
-| **4 — Meta-learning** | Extract dataset meta-features (rows, sparsity, feature types, imbalance); compare against historical experiments by cosine similarity / KNN; rank algorithms with a plain-English rationale | A persisted experiment history, which needs the versioned run object (§2.4) and `schema.json` |
-| **5 — Parallel training** | Train XGBoost, Random Forest, Logistic Regression, SVM (RBF), KNN and Decision Tree on Celery workers | A job queue and a broker; a fitted-pipeline artefact that is loadable by a worker |
-| **6 — Explainability** | SHAP values on the top model, beeswarm, bar and waterfall plots; F1, ROC-AUC, RMSE | Stage 5, and the feature map this release already produces |
-| **7 — Leaderboard & report** | Model rankings, experiment history, downloadable PDF | Stages 4–6 |
+| Stage | Objective | Capability | Lands | Depends on |
+|---|---|---|---|---|
+| **4 — Meta-learning** | 2 | Meta-features (`n_rows`, `n_cols`, `n_numerical`, `n_categorical`, sparsity, imbalance ratio, mean absolute correlation, target type); cosine similarity and KNN against a pre-populated history of 50–100 Kaggle/UCI/OpenML records; ranked algorithms with a plain-English rationale | **Jan-27** | The versioned run object and `schema.json` — **already built** (§2.4). The corpus is generated once on burst compute from OpenML benchmark runs |
+| **5 — Parallel training** | 3 | Logistic Regression, Random Forest, XGBoost, SVM (RBF), KNN and Decision Tree as independent Celery tasks over Redis; macro F1, ROC-AUC, precision, recall and confusion matrix for classification, RMSE/MAE/R² for regression; status pushed over WebSocket | **Feb-27** | A broker, and a fitted-pipeline artefact loadable by a worker without importing the web app |
+| **6 — Explainability** | 3 | SHAP on the top model — beeswarm and bar summaries, per-prediction waterfall, subsampled to 1,000 rows with the sampling stated | **Mar-27** | Stage 5, and the feature map this release already produces |
+| **7 — Leaderboard** | 3 | Sortable model rankings within a run | **Mar-27** | Stages 4–6 |
+| **7 — Report & dashboard** | 4 | Shared experiment dashboard, run comparison, downloadable PDF | **Q3** | Stage 7 leaderboard, and accounts |
 
-The sequencing constraint is that Stage 4 needs a durable, versioned run before it has
-anything to learn from. That object is the first item of Stage 4 work, not the last.
+**The sequencing constraint has already been discharged.** Stage 4 needed a durable,
+versioned run before it had anything to learn from; §2.4 records that this object was
+built, so Stage 4 is unblocked. The remaining prerequisite is infrastructural, not
+architectural: PostgreSQL, object storage and a Linux execution sandbox, all of which land
+in Q1.
+
+**Stage 4's persistence engine is settled.** The store is **PostgreSQL** — named in the
+proposal's architecture, its trade-off section and its budget. Design.md §11.1 previously
+recorded this as an open question; it is not one.
 
 ---
 
@@ -613,7 +670,9 @@ current state is given.
 | 11 | A performance budget is asserted for a 10 MB file | ✅ machine-calibrated, plus a scaling check (NFR-014) |
 | 12 | `AUDIT.md` reflects the code as it stands | ✅ |
 
-**All twelve conditions are met.** The two that were outstanding in version 1.0 — the UI
+**All twelve conditions are met.** This is the definition of done for *this release*, not
+for the funded project; Objectives 2–5 have their own deliverables and their own quarters
+(§10, and the execution plan). The two that were outstanding in version 1.0 — the UI
 rendering of engine warnings, and the performance budget — were closed in the
 remediation round recorded in AUDIT.md §8.
 

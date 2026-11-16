@@ -32,8 +32,11 @@ from app.config import (
     HEALTH_WEIGHTS,
     MAX_MISSING_RATE,
     MIN_ROWS,
+    MISSING_MARKERS,
     MISSING_MENTION_RATE,
     MISSING_TOKENS,
+    MISSING_WORDS,
+    PLACEHOLDER_WORD_MAX_SHARE,
     SMALL_SAMPLE_PENALTY,
     SMALL_SAMPLE_ROWS,
 )
@@ -41,6 +44,7 @@ from app.config import (
 __all__ = [
     "IngestError",
     "IngestResult",
+    "PlaceholderDecision",
     "read_upload",
     "loader_source",
 ]
@@ -194,6 +198,40 @@ class QualityIssue:
 
 
 @dataclass
+class PlaceholderDecision:
+    """What the placeholder pass did, column by column.
+
+    Recorded rather than counted because the pass now makes a judgement — some words
+    are left in place — and a judgement nobody can see is the thing this module exists
+    not to do. The user reads it as a sentence; the exported script reproduces it.
+    """
+
+    #: ``{column: {token: how many}}`` — strings that became blanks.
+    blanked: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: ``{column: {word: share of the column's written values}}`` — words left as they
+    #: were written, because they are too common in that column to be gaps.
+    kept: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        """How many cells were blanked."""
+        return sum(sum(tokens.values()) for tokens in self.blanked.values())
+
+    @property
+    def tokens(self) -> list[str]:
+        """Which strings were blanked, most frequent first, across the whole file."""
+        totals: dict[str, int] = {}
+        for tokens in self.blanked.values():
+            for token, count in tokens.items():
+                totals[token] = totals.get(token, 0) + count
+        return sorted(totals, key=lambda token: (-totals[token], token))
+
+    def for_column(self, column: str) -> list[str]:
+        """The tokens blanked in one column, which is what the export needs."""
+        return sorted(self.blanked.get(column, {}))
+
+
+@dataclass
 class IngestResult:
     """A clean frame plus the story of how it got that way."""
 
@@ -229,6 +267,11 @@ class IngestResult:
     available_sheets: list[str] = field(default_factory=list)
     #: Values in a date column that could not be parsed and became blanks.
     unparsed_dates: dict[str, int] = field(default_factory=dict)
+    #: What the placeholder pass decided: which strings it read as blanks in which
+    #: column, and which words it left in place because they were too common there to
+    #: be gaps. Carried so the exported script rebuilds the same frame, and so the
+    #: judgement can be audited rather than taken on trust.
+    placeholders: PlaceholderDecision = field(default_factory=PlaceholderDecision)
 
 
 # --------------------------------------------------------------------------------------
@@ -267,21 +310,55 @@ def _detect_delimiter(sample: str) -> str:
 # --------------------------------------------------------------------------------------
 
 
-def _blank_placeholders(df: pd.DataFrame) -> int:
-    """Turn text that means "no value" into real blanks. Returns how many were found."""
-    replaced = 0
+def _blank_placeholders(df: pd.DataFrame) -> PlaceholderDecision:
+    """Turn text that means "no value" into real blanks.
+
+    Two kinds of token, treated differently, because conflating them destroyed real
+    data. ``MISSING_MARKERS`` are notations for absence — ``?``, ``null``, an empty
+    cell — and mean a gap however often they occur. ``MISSING_WORDS`` are ordinary
+    words that are a gap *sometimes*: ``none`` is the negative half of a yes/no column
+    far more often than it is a missing value, and blanking it wholesale turned a
+    complete 1,000-row dataset into one the app described as 11% empty. See
+    ``config.MISSING_WORDS`` for that case in full.
+
+    So a word is read as a gap only when it is at most ``PLACEHOLDER_WORD_MAX_SHARE``
+    of what is written in its column. Above that it is a level of the variable and is
+    left exactly as the user typed it.
+
+    Every share is measured against the column's non-blank count *as it arrived*, before
+    anything in this pass is changed, so the order the tokens happen to be considered in
+    cannot change the outcome.
+    """
+    decision = PlaceholderDecision()
+
     for column in df.columns:
         series = df[column]
         if series.dtype != object:
             continue
-        as_text = series.astype("string")
-        normalised = as_text.str.strip().str.lower()
-        hits = normalised.isin(MISSING_TOKENS) & series.notna()
-        count = int(hits.sum())
-        if count:
-            df.loc[hits, column] = np.nan
-            replaced += count
-    return replaced
+        present = series.notna()
+        written = int(present.sum())
+        if not written:
+            continue
+
+        normalised = series.astype("string").str.strip().str.lower()
+        counts = normalised[present].value_counts()
+
+        to_blank: list[str] = []
+        for token, count in counts.items():
+            token = str(token)
+            if token not in MISSING_TOKENS:
+                continue
+            share = int(count) / written
+            if token in MISSING_WORDS and share > PLACEHOLDER_WORD_MAX_SHARE:
+                decision.kept.setdefault(str(column), {})[token] = share
+                continue
+            to_blank.append(token)
+            decision.blanked.setdefault(str(column), {})[token] = int(count)
+
+        if to_blank:
+            df.loc[normalised.isin(to_blank) & present, column] = np.nan
+
+    return decision
 
 
 def _percentage_columns(df: pd.DataFrame) -> list[str]:
@@ -911,10 +988,26 @@ def read_upload(
         )
 
     placeholders = _blank_placeholders(frame)
-    if placeholders:
+    if placeholders.total:
+        found = placeholders.tokens
+        shown = ", ".join(f"'{token}'" if token else "an empty cell" for token in found[:4])
+        more = " and others" if len(found) > 4 else ""
         cleaning.append(
-            f"Recognised {placeholders:,} placeholder values such as 'N/A' and '-' as "
-            "genuinely missing"
+            f"Read {_plural(placeholders.total, 'placeholder value')} as genuinely "
+            f"missing: {shown}{more}"
+        )
+    if placeholders.kept:
+        named = ", ".join(
+            f"{column} ('{word}' in {share:.0%} of its values)"
+            for column, words in list(placeholders.kept.items())[:3]
+            for word, share in sorted(words.items(), key=lambda kv: -kv[1])[:1]
+        )
+        more = " and others" if len(placeholders.kept) > 3 else ""
+        cleaning.append(
+            f"Left a word that can mean 'no value' exactly as written in "
+            f"{_plural(len(placeholders.kept), 'column')}, because it is far too common "
+            f"there to be an accident and reads as an answer rather than a gap: "
+            f"{named}{more}"
         )
 
     percentages = _percentage_columns(frame)
@@ -998,6 +1091,7 @@ def read_upload(
             list_sheets(raw) if filename.lower().endswith(_SPREADSHEET_SUFFIXES) else []
         ),
         unparsed_dates=unparsed_dates,
+        placeholders=placeholders,
     )
 
 
@@ -1015,7 +1109,8 @@ def loader_source(result: IngestResult) -> tuple[str, str]:
     source to paste into the script, and the expression that calls it.
     """
     is_spreadsheet = result.delimiter.startswith("n/a")
-    tokens = sorted(MISSING_TOKENS)
+    markers = sorted(MISSING_MARKERS)
+    words = sorted(MISSING_WORDS)
 
     if is_spreadsheet:
         read_line = "    df = pd.read_excel(CSV_PATH)"
@@ -1030,7 +1125,9 @@ def loader_source(result: IngestResult) -> tuple[str, str]:
 # --- Reading the file exactly as the app did -----------------------------------------
 # These are format repairs, not anything learned from the data: they apply to every row
 # and happen before the split.
-MISSING_TOKENS = {tokens!r}
+MISSING_MARKERS = {markers!r}
+MISSING_WORDS = {words!r}
+PLACEHOLDER_WORD_MAX_SHARE = {PLACEHOLDER_WORD_MAX_SHARE!r}
 TEXT_NUMBER_COLUMNS = {result.numeric_columns!r}
 TEXT_DATE_COLUMNS = {result.datetime_columns!r}
 NUMERIC_NOISE = r"[,\\s ₹$€£%]"
@@ -1042,11 +1139,24 @@ def load_frame() -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     df = df.dropna(axis=0, how="all").reset_index(drop=True)
 
-    # Text that means "no value" becomes a real blank.
+    # Text that means "no value" becomes a real blank. Two kinds: MISSING_MARKERS are
+    # notations for absence and always mean a gap; MISSING_WORDS are ordinary values that
+    # mean a gap only when they are a small share of what is written in the column --
+    # "none" is the negative half of a yes/no column far more often than it is missing.
     for column in df.columns:
-        if df[column].dtype == object:
-            normalised = df[column].astype("string").str.strip().str.lower()
-            df.loc[normalised.isin(MISSING_TOKENS), column] = np.nan
+        if df[column].dtype != object:
+            continue
+        present = df[column].notna()
+        written = int(present.sum())
+        if not written:
+            continue
+        normalised = df[column].astype("string").str.strip().str.lower()
+        tokens = list(MISSING_MARKERS)
+        for word in MISSING_WORDS:
+            share = int((normalised[present] == word).sum()) / written
+            if share <= PLACEHOLDER_WORD_MAX_SHARE:
+                tokens.append(word)
+        df.loc[normalised.isin(tokens) & present, column] = np.nan
 
     # Columns stored as text that are really numbers.
     for column in TEXT_NUMBER_COLUMNS:

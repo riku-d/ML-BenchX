@@ -7,6 +7,16 @@ Scope: Stages 1–3 (ingestion, profiling, glass-box preprocessing). Stages 4–
 **PLANNED** and were not audited beyond confirming that nothing claims to implement
 them.
 
+**This document records evidence, not direction.** It is a point-in-time record of what
+was true on 30 October 2026 and is not corrected by the governing documents — the
+**Institute Seed Grant proposal** and the **Project I semester report** — which set scope
+and schedule. Where those documents place a finding on a timeline, that is in
+[PRD.md](PRD.md) §10, [Design.md](Design.md) §11 and
+[EXECUTION_PLAN_OCT26_MAR27.md](EXECUTION_PLAN_OCT26_MAR27.md). Three findings here are
+now scheduled rather than open: the macOS-only sandbox layer (container, Nov-26), the
+SQLite/local-filesystem stores (PostgreSQL and R2 adapters, Nov-26), and the absence of a
+queue (Celery over Redis, Feb-27).
+
 | Document | Answers |
 |---|---|
 | [PRD.md](PRD.md) | What the product must do, and what counts as done |
@@ -146,7 +156,7 @@ names the test that holds it; a row with no test says so.
 | Reject below the row floor (50) | PASS | `ingest:877` | — | — | Scenario F |
 | Headerless detection | PASS | `_looks_headerless:588` | Previously FAIL | — | `test_source_format.py` |
 | Header tidying + original→clean mapping | PASS | `_tidy_headers:422` | Mapping retained, not just a count. Previously FAIL | — | fixture `unicode_duplicate_headers.csv` |
-| Missing-token recognition | PASS | `_blank_placeholders:267` | — | — | `test_app.py` |
+| Missing-token recognition | PASS | `_blank_placeholders:313` | **Rule revised 16 Nov 2026.** This row passed against the original rule, which blanked the literal word `none` at any frequency and so deleted a real binary feature on `credit-g` — then reported the blanks it had created as the user's data. The requirement is unchanged; what satisfies it is now two sets with a frequency test on the words. Diagnosis, fix and measurements in STAGE4_PLAN.md §11a | — | `test_placeholders.py`, `test_parity.py` |
 | Numeric coercion (`1,234`, `$5`, `12%`) | PARTIAL | `_coerce_numeric:284` | Converts only when every non-blank value converts | **`12%` → `12`, not `0.12`.** Documented in PRD.md §9 R8 rather than changed: silently rescaling a column by 100 would alter results for anyone already relying on it | `test_rules.py` |
 | Datetime coercion at ≥90% | PASS | `_coerce_datetime:336`, `DATE_PARSE_RATE` | Four-digit-year anchor stops `1.2.3` parsing as a date. Previously the gate was 100% | — | `test_rules.py` |
 | Boolean coercion (`yes/no`, `y/n`) | PASS | `_coerce_boolean:390` | Previously FAIL | — | `test_rules.py` |

@@ -46,7 +46,28 @@
 
   --color-text: #e8ecf2;
   --color-muted: #8b93a3;
-  --color-faint: #565e6e;
+
+  /* Tertiary ink.
+
+     Was #565e6e, which measured 2.75:1 on `raised` and 3.05:1 on `void` — below the
+     4.5:1 that body text needs, in all 116 places it was used. It was not a
+     theoretical failure: at 11px in IBM Plex Mono the top bar's "OS sandbox" label
+     read as "05 sandbox", because a capital O and a zero are not distinguishable at
+     that contrast. The label describing how the user's code is sandboxed was the least
+     legible text in the product.
+
+     #788090 is the first step along the same cool-grey ramp that clears 4.5:1 against
+     the lightest surface (4.52:1 on `raised`, 5.01:1 on `void`). The ramp is more
+     compressed than it was — `muted` is 5.81:1 — so the rule from here is about role
+     rather than value: if a person is expected to READ it, it is `muted` or lighter.
+     `faint` is for text that is genuinely supplementary, and `hairline` below is for
+     marks that are not text at all. */
+  --color-faint: #788090;
+
+  /* Non-text decoration only — separators, tick marks, inactive dots. Deliberately
+     below the text floor, which is allowed because WCAG sets no contrast minimum for
+     purely decorative marks. Never put a sentence in this. */
+  --color-hairline: #565e6e;
 
   --color-accent: #3dd6c4;
   --color-accent-dim: #1d7a70;
@@ -59,8 +80,59 @@
   --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
 
+  /* -------------------------------------------------------------------------
+     Type scale.
+
+     The app had grown 25 distinct arbitrary pixel sizes — 8, 9, 9.5, 10, 10.5,
+     11, 11.5, 12, 12.5, 13, 13.5, 14, 15, 16, 17, 18, 19, 20, 28, 30, 34, 40,
+     42, 46, 64 — alongside Tailwind's own scale in 26 more places. Half-pixel
+     steps do not read as hierarchy; they read as drift, and there was nowhere
+     to change reading size once.
+
+     Eight roles, named for what they are for. 11px is the floor: nothing a
+     person has to read is set smaller, because the 9.5px labels were the other
+     half of the legibility problem that `faint` caused.
+  ------------------------------------------------------------------------- */
+  --text-display: 42px;
+  --text-display--line-height: 1.05;
+  --text-title: 30px;
+  --text-title--line-height: 1.12;
+  --text-heading: 19px;
+  --text-heading--line-height: 1.3;
+  --text-subhead: 16px;
+  --text-subhead--line-height: 1.4;
+  --text-body: 14px;
+  --text-body--line-height: 1.6;
+  --text-ui: 13px;
+  --text-ui--line-height: 1.45;
+  --text-meta: 12px;
+  --text-meta--line-height: 1.4;
+  --text-micro: 11px;
+  --text-micro--line-height: 1.35;
+
+  /* -------------------------------------------------------------------------
+     Tinted surfaces and borders.
+
+     These were being computed inline at each call site — 24 `color-mix()`
+     expressions across 7 files, with the same semantic surface written at 7%,
+     8%, 9%, 10%, 11% and 12% depending on who wrote it. Named once here so the
+     tint is a decision rather than an accident, and so a light theme would have
+     one place to change.
+  ------------------------------------------------------------------------- */
+  --color-danger-surface: color-mix(in oklab, #e2685f 10%, transparent);
+  --color-danger-border: color-mix(in oklab, #e2685f 42%, transparent);
+  --color-warn-surface: color-mix(in oklab, #e0a33c 10%, transparent);
+  --color-warn-border: color-mix(in oklab, #e0a33c 42%, transparent);
+  --color-accent-surface: color-mix(in oklab, #3dd6c4 10%, transparent);
+  --color-accent-border: color-mix(in oklab, #3dd6c4 42%, transparent);
+  --color-good-surface: color-mix(in oklab, #4ba97a 10%, transparent);
+  --color-good-border: color-mix(in oklab, #4ba97a 42%, transparent);
+  --color-info-surface: color-mix(in oklab, #6f8fd6 10%, transparent);
+  --color-info-border: color-mix(in oklab, #6f8fd6 42%, transparent);
+
   --radius-panel: 14px;
   --radius-card: 10px;
+  --radius-control: 8px;
 }
 
 html {

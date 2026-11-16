@@ -1,6 +1,17 @@
 # ML-BenchX — technical design
 
-**Version 1.0 · 30 October 2026 · describes the repository at `5a2328e` + working tree**
+**Version 1.1 · 31 October 2026 · describes the repository at `5a2328e` + working tree,
+reconciled against the governing documents**
+
+> **Governing documents.** The **Institute Seed Grant proposal** (PI Deblina Chowdhury,
+> Heritage Institute of Technology) and the **Project I semester report**
+> (`DSC3295-23-27-T15_Sem;colon_report1.pdf`) set direction, scope and schedule; ₹60,800
+> was sanctioned against the proposal's objectives, four-quarter work plan and budget.
+> This document is still the authority on *how the code is built today*, and still
+> describes nothing that does not exist — but a **[PLANNED]** item is now planned *for a
+> named quarter on funded hardware*, and the one **[OPEN]** question the proposal settles
+> has been closed. Delivery and cost by month:
+> [EXECUTION_PLAN_OCT26_MAR27.md](EXECUTION_PLAN_OCT26_MAR27.md).
 
 This document explains *how* ML-BenchX is built. It is one of three:
 
@@ -20,7 +31,7 @@ AUDIT.md and are referenced, not duplicated.
 |---|---|
 | **[IMPL]** | Implemented, and covered by an executed test. The test is named |
 | **[PRESENT]** | Implemented, inspected, but not covered by a test that would catch a regression |
-| **[PLANNED]** | Not implemented. Described as intent only |
+| **[PLANNED]** | Not implemented. Described as intent only — and, where the governing documents fund it, carrying the quarter it is due |
 | **[OPEN]** | A design question this repository does not answer. Recorded rather than guessed |
 
 Nothing here describes a module, endpoint, table or integration that does not exist.
@@ -31,11 +42,19 @@ stated as fact.
 
 ## 1. System overview
 
-ML-BenchX is a **local, single-process, two-tier application**: a FastAPI backend and a
-React single-page frontend, with SQLite for metadata and the local filesystem for bytes.
-There is no queue, no broker, no cache server, no external service and no network egress
-at runtime. **[IMPL]** — the executor's sandbox tests assert that the only code which
-could reach the network cannot (`test_executor.py`).
+**Today** ML-BenchX is a **local, single-process, two-tier application**: a FastAPI
+backend and a React single-page frontend, with SQLite for metadata and the local
+filesystem for bytes. There is no queue, no broker, no cache server, no external service
+and no network egress at runtime. **[IMPL]** — the executor's sandbox tests assert that
+the only code which could reach the network cannot (`test_executor.py`).
+
+**This topology is a stage, not a commitment.** The funded architecture is decoupled and
+is what the grant pays for: FastAPI, PostgreSQL and a Redis broker on an application
+server; an isolated Celery compute tier on an ML worker server; a staging server for
+migrations, monitoring and error tracking; Cloudflare R2 for bytes, because workers are
+stateless and cannot share local disk. Provisioning completes December 2026 and the
+pieces land across Q1 and Q2 — see §11 for each one's quarter. The local topology below
+remains the development mode, and the two must not be confused in any claim.
 
 ```mermaid
 flowchart LR
@@ -97,23 +116,34 @@ A hand-maintained log drifts; a derived one cannot. **[IMPL]** — `test_glassbo
 
 ## 2. Implementation status against the seven-stage architecture
 
-The product vision is seven stages. **Three are built.**
+The product vision is seven stages. **Three are built**, and the remaining four are
+funded objectives of the seed grant with sanctioned quarters. Nothing below marked
+**[PLANNED]** exists; the quarter says when it is due, not that it is underway.
 
-| Stage | Intent | Status | Where |
-|---|---|---|---|
-| **1 — Ingestion** | Upload, validate, detect encoding, infer types | **[IMPL]** | `services/ingest.py` |
-| **2 — Profiling** | Health score, missing, imbalance, correlation, per-column flags | **[IMPL]** | `services/profile.py`, `services/health.py` |
-| **3 — Glass-box preprocessing** | Impute, encode, scale, detect leakage, split | **[IMPL]** | `services/glassbox.py`, `codegen.py` |
-| **3.5 — Plan & Run** | A reviewable per-column plan, and a durable versioned run with artifacts | **[IMPL]** | §12. The prerequisite Stage 4 was blocked on |
-| **4 — Meta-learning** | Meta-features, cosine/KNN over experiment history, algorithm ranking | **[PLANNED]** | Nothing exists. §11 |
-| **5 — Parallel training** | Celery workers: XGBoost, RF, LogReg, SVM, KNN, Decision Tree | **[PLANNED]** | No Celery, no broker, no worker |
-| **6 — Explainability** | SHAP, beeswarm/bar/waterfall, F1 / ROC-AUC / RMSE | **[PLANNED]** | No SHAP dependency |
-| **7 — Leaderboard & report** | Rankings, history, PDF | **[PLANNED]** | Nothing exists |
+| Stage | Intent | Status | Due | Where |
+|---|---|---|---|---|
+| **1 — Ingestion** | Upload, validate, detect encoding, infer types | **[IMPL]** | — | `services/ingest.py` |
+| **2 — Profiling** | Health score, missing, imbalance, correlation, per-column flags | **[IMPL]** | — | `services/profile.py`, `services/health.py` |
+| **3 — Glass-box preprocessing** | Impute, encode, scale, detect leakage, split | **[IMPL]** | — | `services/glassbox.py`, `codegen.py` |
+| **3.5 — Plan & Run** | A reviewable per-column plan, and a durable versioned run with artifacts | **[IMPL]** | — | §12. The prerequisite Stage 4 was blocked on |
+| **4 — Meta-learning** | Meta-features, cosine/KNN over experiment history, algorithm ranking | **[PLANNED]** | Jan-27 | Nothing exists. §11 |
+| **5 — Parallel training** | Celery workers: XGBoost, RF, LogReg, SVM, KNN, Decision Tree | **[PLANNED]** | Feb-27 | No Celery, no broker, no worker |
+| **6 — Explainability** | SHAP, beeswarm/bar/waterfall, F1 / ROC-AUC / RMSE | **[PLANNED]** | Mar-27 | No SHAP dependency |
+| **7 — Leaderboard** | Sortable rankings within a run | **[PLANNED]** | Mar-27 | Nothing exists |
+| **7 — Report & dashboard** | Shared dashboard, run comparison, PDF | **[PLANNED]** | Q3 | Nothing exists; needs accounts |
+| **Accounts & RBAC** | Admin / Data Scientist / Collaborator / Viewer, project membership | **[PLANNED]** | Q3 | `project_id` exists on every table, always `"default"` |
 
-**No PostgreSQL.** The architecture diagram shows a PostgreSQL experiment-history
-database for Stage 4. The repository uses **SQLite** (`sqlite:///backend/mlbenchx.db`),
-and no PostgreSQL driver is declared in `requirements.txt`. Stage 4's store is a design
-decision that has not been taken — §11.1, **[OPEN]**.
+**PostgreSQL is the committed store, and SQLite is what is in the repository today.** The
+repository uses **SQLite** (`sqlite:///backend/mlbenchx.db`) and declares no PostgreSQL
+driver in `requirements.txt`. The proposal names PostgreSQL in its architecture, its
+trade-off section and its budget, so this is **[PLANNED]** for November 2026 — an adapter
+behind SQLAlchemy, with SQLite retained as the local default — and is no longer the
+**[OPEN]** question §11.1 used to record.
+
+**The container sandbox is a precondition, not a hardening step.** `sandbox-exec` is
+macOS-only (§8.4). Every funded server runs Linux and the deployment is public, so the
+container with no network namespace must land **before** any server is provisioned —
+November 2026. **[PLANNED]**.
 
 `app/plan.py` and `app/runner.py` were unreachable when this document was first
 written. They no longer are: `app/services/planning.py` and `app/planning_api.py` reach
@@ -416,7 +446,7 @@ Ordered, and the order matters.
 | 4 | Delimiter detection | Sniffed from a sample |
 | 5 | Parse | Per format: CSV/TSV, Excel (with sheet selection), JSON (records/columns/lines), Parquet |
 | 6 | Header tidy | Strip, disambiguate repeats, **retain the original→clean mapping** — every message names a column, and a user who uploaded `" Total Revenue "` needs to see what they typed |
-| 7 | Placeholder blanking | `MISSING_TOKENS` — `N/A`, `-`, `unknown`, `nil`… |
+| 7 | Placeholder blanking | Two sets. `MISSING_MARKERS` (`N/A`, `?`, `null`, `nan`…) are notations for absence and blank at any frequency. `MISSING_WORDS` (`-`, `none`, `unknown`, `nil`…) blank **only below `PLACEHOLDER_WORD_MAX_SHARE` (20%) of a column's written values** — a word holding more than that is the column's category level. `credit-g`'s `own_telephone` is `none`/`yes`, and blanking the negative class dropped the feature and then reported the loss as the user's missing data. `credit-approval`'s binary target is `-`/`+`, which is why the dash is frequency-tested too. STAGE4_PLAN.md §11a, §14 |
 | 8 | Numeric coercion | **Only when every non-blank value converts.** A column where 3 of 500 values are text is more likely a genuine category than a broken number, and turning those 3 into blanks would destroy data |
 | 9 | **Non-finite blanking** | `±inf` → `NaN`. §6.2 |
 | 10 | Date coercion | Requires a **four-digit year** anchor, at ≥ `DATE_PARSE_RATE` (90%). Without the anchor pandas reads `1.2.3` as 3 February 2001 and a bare `2019` as a timestamp — a column of version numbers would silently become dates |
@@ -823,10 +853,27 @@ position. **[OPEN]** — retention policy.
 
 ## 9. Dependencies and external interactions
 
-**External service interactions: none.** No network egress at runtime, no API keys, no
-third-party service, no LLM. Target detection is a four-tier string-matching cascade
+**External service interactions today: none.** No network egress at runtime, no API keys,
+no third-party service, no LLM. Target detection is a four-tier string-matching cascade
 specifically so that it needs neither — the result is always shown back to the user with
 a way to change it, because a silent wrong guess is worse than an obvious one.
+
+**One external service is funded, from Dec-26: Google Gemini Flash-Lite**, powering a
+natural-language goal interface — stating a goal in plain English instead of configuring a
+pipeline. **[PLANNED]**. Four properties are design constraints, not policy, and the
+cascade above is what makes three of them cheap:
+
+- **Only column names and aggregate statistics are transmitted. No data row is ever sent**,
+  and a test must assert it. This is the proposal's own commitment, and the reason the
+  **paid** tier is funded: free tiers permit the provider to retain and train on submitted
+  prompts, which is unacceptable once institutional schemas are processed.
+- The string-matching cascade **remains** as the offline fallback, so the feature degrades
+  rather than fails, and an unreachable API is a cosmetic loss.
+- Local operation keeps the LLM off entirely; the API key is configuration, not a
+  requirement.
+- The model's output is a **proposal into the existing plan-review screen**, where the user
+  can change any of it — it does not act. This keeps C2 intact: the log still derives from
+  fitted objects, and nothing the model says is a measurement.
 
 ### 9.1 Runtime dependencies and what each is load-bearing for
 
@@ -855,10 +902,16 @@ them. AUDIT.md §5.7 O4.
 
 One `uvicorn` process. Compiling is **synchronous**: a pipeline on the file sizes this
 accepts finishes in about a second, and a job queue would be machinery with nothing to
-do. A dataset large enough to need one would need streaming ingestion first. The app is
-single-worker by design in development; nothing in the storage or database layer prevents
-more than one — the in-memory run cache simply stops being useful. **[PRESENT]** — not
-tested under concurrency.
+do *for preprocessing*. The app is single-worker by design in development; nothing in the
+storage or database layer prevents more than one — the in-memory run cache simply stops
+being useful. **[PRESENT]** — not tested under concurrency.
+
+**This stops being the whole picture in Q2.** Model training is not preprocessing: six
+algorithms trained in parallel are memory-bound and long-running, which is exactly the
+workload a queue exists for. Celery over Redis, on a separate ML worker server, is
+**[PLANNED]** for February 2027, with a bounded per-session concurrency limit and a target
+of five simultaneous sessions. Preprocessing itself stays synchronous; the queue is for
+Stage 5, not for Stage 3.
 
 ---
 
@@ -874,19 +927,26 @@ tested under concurrency.
 | D6 | Cap outliers, don't remove | Remove | Keeps possibly-wrong values; removal is the only action that loses data outright |
 | D7 | Feature selection off by default | On with a threshold | Keeps redundant columns; which of two correlated columns to keep is a judgement about meaning |
 | D8 | Fixed step order | User-reorderable | Less flexibility; no pipelines that fail inexplicably |
-| D9 | SQLite + local filesystem | PostgreSQL + object store | Not multi-user; zero operational burden, and `StorageBackend` makes the second swappable |
-| D10 | Synchronous compile | Celery | Blocks a request; no broker to run or debug |
+| D9 | SQLite + local filesystem | PostgreSQL + object store | Not multi-user; zero operational burden, and `StorageBackend` makes the second swappable. **Expires Nov-26** — PostgreSQL and R2 are funded and committed; the interfaces are why this is an adapter, not a rewrite |
+| D10 | Synchronous compile | Celery | Blocks a request; no broker to run or debug. **Expires Feb-27** for training; preprocessing stays synchronous |
 | D11 | Store whole configs in `history` | Diffs | More bytes; restore is a read, not a replay |
-| D12 | `project_id` everywhere, always `"default"` | Add it when accounts arrive | A dead column; accounts become a migration, not a redesign |
+| D12 | `project_id` everywhere, always `"default"` | Add it when accounts arrive | A dead column; accounts become a migration, not a redesign. **Vindicated** — accounts are Objective 4, Q3, and this is why they are a migration |
 | D13 | Payload JSON columns | Normalised per-column tables | Not queryable; a run reads back exactly as shown. Blocks Stage 4 (§11.1) |
 | D14 | Infinity → missing | Propagate, or special-case each consumer | Validity signal moves to completeness (§6.2) |
 | D15 | Exact dependency pins | Compatible ranges | Manual upgrades; determinism survives a point release |
 
 ### 10.1 Assumptions
 
-Single user on a local machine · files under 50 MB · tabular data with a header row · one
-target column the user can name or describe · a trusted operator, since the editor runs
-arbitrary Python and the sandbox is a defence, not an authorisation boundary.
+Files under 50 MB · tabular data with a header row · one target column the user can name
+or describe. Single user on a local machine holds **until Q3**, when the deployed
+multi-user instance supersedes it.
+
+The last assumption is the one that must change first, and deliberately: *a trusted
+operator, since the editor runs arbitrary Python and the sandbox is a defence, not an
+authorisation boundary.* A public deployment has no trusted operator. This is why the
+container with no network namespace precedes provisioning rather than following it, and
+why Q3's role model must decide explicitly which roles may execute hand-edited code at
+all — a Viewer plainly may not.
 
 ### 10.2 Open questions
 
@@ -896,7 +956,9 @@ arbitrary Python and the sandbox is a defence, not an authorisation boundary.
 | **[OPEN]** | Should the validity dimension carry forward the pre-repair infinity count (§6.2) |
 | **[OPEN]** | Retention policy for uploads and run artefacts; nothing is ever deleted (§8.6) |
 | **[OPEN]** | Whether `12%` should ingest as `0.12`. Changing it silently rescales existing users' columns by 100 |
-| **[OPEN]** | Stage 4's persistence engine; the diagram says PostgreSQL, the repository has SQLite and no driver (§11.1) |
+| ~~[OPEN]~~ | ~~Stage 4's persistence engine~~ — **closed.** PostgreSQL, per the proposal's architecture, trade-offs and budget. Adapter due Nov-26 (§2, §11.1) |
+| **[OPEN]** | Which roles may execute hand-edited Python once the deployment is multi-user (§10.1) |
+| **[OPEN]** | The project's licence. Q4 commits to an open-source release; no `LICENSE` file exists and institute IP policy may apply |
 | **[OPEN]** | Whether `app/plan.py` / `app/runner.py` are wired in or deleted (§2) |
 | **[OPEN]** | Whether the whole-workspace response survives a higher upload cap (§5.1) |
 
@@ -908,6 +970,13 @@ arbitrary Python and the sandbox is a defence, not an authorisation boundary.
 is no Celery, no broker, no PostgreSQL, no SHAP, no model training and no leaderboard.
 The architecture diagram describes the intended product, not the current one. PRD.md §10
 states the same boundary from the product side.
+
+What has changed is the status of the intent. These are the funded objectives of the seed
+grant, each with a quarter and a budgeted machine: Stage 4 in **Jan-27**, Stage 5 in
+**Feb-27**, Stage 6 and the leaderboard in **Mar-27**, the PDF report and shared dashboard
+in **Q3** alongside accounts. The sketch below is therefore a design to be built against,
+not a speculation — but it describes nothing that exists today, and no reader may treat it
+as though it does.
 
 ### 11.1 The prerequisite — a durable, comparable run — is now met
 
@@ -926,10 +995,20 @@ were neither. They are now:
 What remains unbuilt is Stage 4 itself — the meta-features, the similarity search and
 the ranking. See §12.4 for what a Stage 4 consumer can rely on.
 
-Whether that store stays SQLite or becomes PostgreSQL is **[OPEN]**. Nothing in the
-current design forces either: `StorageBackend` already abstracts bytes, and SQLAlchemy
-abstracts the engine. The question is whether concurrent workers (Stage 5) need a
-database that handles concurrent writers better than SQLite does.
+**That store is PostgreSQL.** This was recorded as **[OPEN]** when the question was
+whether concurrent workers would need a database that handles concurrent writers better
+than SQLite does. The governing documents answer it — PostgreSQL appears in the proposal's
+architecture, its trade-off section ("SQLite during MVP development… with PostgreSQL
+planned for future deployment") and its budget, which funds the server that hosts it.
+`StorageBackend` already abstracts bytes and SQLAlchemy abstracts the engine, so this is
+an adapter plus an Alembic run against a second engine, due **Nov-26**. SQLite stays the
+local default.
+
+One consequence to design for: the corpus Stage 4 ranks against is **pre-populated**, not
+grown from use. The proposal funds a one-time burst-compute job that generates 50–100
+labelled experiment records from OpenML benchmark runs (Jan-27). An evaluation subset must
+be held out of that corpus and never seeded, because the 80 % accuracy KPI cannot be
+measured on the records that produced the ranking.
 
 ### 11.2 Sketch
 

@@ -10,16 +10,20 @@
  * have been shown and accepted — which is the difference between a control and a trap.
  */
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ChevronRight,
+  Code2,
+  Gauge,
   Lock,
   Settings2,
   ShieldAlert,
 } from "lucide-react";
 import type { ImpactReport, PipelineConfig, Severity, StepId, StepView, Workspace } from "../api";
-import { Badge, Button, Dialog, Disclosure, Segmented, Select, Spinner, Toggle } from "../components/ui";
+import { Badge, Button, Dialog, Segmented, Select, Spinner, Toggle, Tooltip } from "../components/ui";
+import { Term } from "../explain/Term";
+import { describeStep, findStepInCode, headline, perColumnLegend } from "../explain/steps";
 
 const SEVERITY_TONE: Record<Severity, "neutral" | "info" | "warn" | "danger"> = {
   none: "neutral",
@@ -29,12 +33,27 @@ const SEVERITY_TONE: Record<Severity, "neutral" | "info" | "warn" | "danger"> = 
   blocking: "danger",
 };
 
+/**
+ * Severity describes the step being OFF, because that is what the server measures.
+ *
+ * So the badge has to be phrased differently depending on which way the switch is
+ * moving: disabling, it is a warning about what you are about to cause; enabling, it is
+ * a description of what you already have and are about to fix.
+ */
 const SEVERITY_WORD: Record<Severity, string> = {
   none: "No effect on this dataset",
   low: "Minor effect",
   moderate: "Noticeable effect",
   high: "Significant effect",
   blocking: "This will stop the pipeline working",
+};
+
+const SEVERITY_WORD_ENABLING: Record<Severity, string> = {
+  none: "Nothing to fix on this dataset",
+  low: "Fixes a minor problem",
+  moderate: "Fixes a noticeable problem",
+  high: "Fixes a significant problem",
+  blocking: "The pipeline cannot run without this",
 };
 
 /** The status dot on a card. Shape and text carry the meaning; colour reinforces it. */
@@ -474,10 +493,20 @@ function ImpactDialog({
         </>
       }
     >
-      <Badge tone={tone} className="mb-3">{SEVERITY_WORD[report.severity]}</Badge>
+      <Badge tone={tone} className="mb-3">
+        {(enabling ? SEVERITY_WORD_ENABLING : SEVERITY_WORD)[report.severity]}
+      </Badge>
 
+      {/* The consequences always describe the step being OFF — the server computes them
+          with `assess_disable` whichever way the switch is moving. Read under "turning
+          this on means", they stated the opposite of what would happen: enabling outlier
+          treatment caps those values, and the dialog said they would be left alone. So
+          the enabling case is framed as the state the user is in now, which is what
+          those sentences actually describe, and which is the reason to turn it on. */}
       <p className="mb-2.5 text-[13px] text-muted">
-        {enabling ? "Turning this on means:" : "If you turn this off:"}
+        {enabling
+          ? "This step is off. As things stand:"
+          : "If you turn this off:"}
       </p>
       <ul className="space-y-2">
         {report.consequences.map((line) => (
@@ -534,26 +563,82 @@ function ImpactDialog({
 // Step card
 // ---------------------------------------------------------------------------------
 
+/** One expandable layer of a step card. */
+function Layer({
+  icon,
+  label,
+  children,
+}: {
+  icon: ReactNode;
+  label: string;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((was) => !was)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 py-1 text-ui text-muted transition-colors hover:text-text"
+      >
+        {icon}
+        {label}
+        <ChevronRight
+          size={11}
+          className={`ml-auto shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+        />
+      </button>
+      {open && <div className="fade mt-2 pb-1">{children}</div>}
+    </div>
+  );
+}
+
+/**
+ * A step, in four layers.
+ *
+ * The face answers what this is, whether it is on, and what it is doing to *this*
+ * dataset — the last of those measured, which it previously was not: `values_affected`
+ * and friends were computed by the server on every request and then never rendered
+ * anywhere. Under the face, three disclosures in the order a reader needs them: where
+ * it shows up in their own data, how it works and what they can change, and the lines
+ * of Python that do it.
+ *
+ * The code link is located by searching the editor's current contents for this step's
+ * banner comment, so it cannot point at the wrong line. A step that is switched off
+ * emits no section, and hand-edited code may not have one; in both cases the link is
+ * absent rather than broken.
+ */
 function StepCard({
   step,
   index,
   config,
+  code,
+  totalRows,
   onToggle,
   onConfigChange,
+  onJumpToLine,
 }: {
   step: StepView;
   index: number;
   config: PipelineConfig;
+  code: string;
+  totalRows: number;
   onToggle: (next: boolean) => void;
   onConfigChange: (next: PipelineConfig) => void;
+  onJumpToLine: (line: number) => void;
 }) {
-  const [open, setOpen] = useState(false);
   const off = !step.enabled;
+  const measured = headline(step, totalRows);
+  const facts = describeStep(step);
+  const legend = perColumnLegend(step.id);
+  const perColumn = Object.entries(step.facts.per_column ?? {});
+  const codeLine = findStepInCode(code, step.label);
 
   return (
     <li className={`card overflow-hidden transition-opacity ${off ? "opacity-60" : ""}`}>
+      {/* ------------------------------------------------- layer 1: at a glance */}
       <div className="flex items-start gap-2.5 p-3">
-        <span className="tnum mt-0.5 w-4 shrink-0 font-mono text-[11px] text-faint">
+        <span className="tnum mt-0.5 w-4 shrink-0 font-mono text-micro text-faint">
           {index + 1}
         </span>
 
@@ -566,15 +651,22 @@ function StepCard({
             {step.locked && <Lock size={10} className="shrink-0 text-faint" />}
           </div>
           <p className="mt-1 text-[12.5px] leading-snug text-muted">{step.summary}</p>
+
+          {/* The one number that makes this step about the reader's file rather than
+              about preprocessing in general. Measured on every request already; it had
+              simply never been shown. */}
+          {measured && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-meta leading-snug text-faint">
+              <Gauge size={11} className="mt-[2px] shrink-0" aria-hidden />
+              <span>{measured}</span>
+            </p>
+          )}
         </div>
 
         {step.locked ? (
-          <span
-            className="mt-0.5 shrink-0 text-[10px] text-faint"
-            title="Every other step depends on knowing the column types"
-          >
-            always on
-          </span>
+          <Tooltip content="Every other step depends on knowing what each column holds, so this one cannot be switched off.">
+            <span className="mt-0.5 shrink-0 text-micro text-faint">always on</span>
+          </Tooltip>
         ) : (
           <Toggle
             size="sm"
@@ -585,40 +677,84 @@ function StepCard({
         )}
       </div>
 
-      <div className="border-t border-line px-3 py-2">
-        <button
-          onClick={() => setOpen((was) => !was)}
-          aria-expanded={open}
-          className="flex w-full items-center gap-1.5 text-[12px] text-muted transition-colors hover:text-text"
-        >
-          <Settings2 size={11} />
-          Options
-          <ChevronRight
-            size={11}
-            className={`ml-auto transition-transform ${open ? "rotate-90" : ""}`}
-          />
-        </button>
+      <div className="space-y-0.5 border-t border-line px-3 py-1.5">
+        {/* ------------------------------------------------ layer 2: the evidence */}
+        {(facts.length > 0 || perColumn.length > 0) && (
+          <Layer
+            icon={<Gauge size={11} className="shrink-0" />}
+            label="Where this shows up in your data"
+          >
+            {/* Stacked, not two across: these sit inside a card whose width is set by
+                the layout, and a viewport breakpoint knows nothing about that. */}
+            {facts.length > 0 && (
+              <dl className="space-y-2.5">
+                {facts.map((fact) => (
+                  <div key={fact.label}>
+                    <dt className="text-micro text-faint">
+                      <Term name={fact.term}>{fact.label}</Term>
+                    </dt>
+                    <dd className="tnum mt-0.5 font-mono text-meta text-text">{fact.value}</dd>
+                    {fact.meaning && (
+                      <dd className="mt-0.5 text-micro leading-relaxed text-faint">
+                        {fact.meaning}
+                      </dd>
+                    )}
+                  </div>
+                ))}
+              </dl>
+            )}
 
-        {open && (
-          <div className="fade mt-3 space-y-3 pb-1">
-            <p className="text-[12.5px] leading-relaxed text-muted">{step.explanation}</p>
-            <StepOptions step={step} config={config} onChange={onConfigChange} />
-            {Object.keys(step.facts.per_column ?? {}).length > 0 && (
-              <Disclosure summary="Which columns ›">
+            {/* The same key counts a different thing in every step, so the list says
+                which thing. It used to read "Which columns" over bare numbers, which
+                put 2 distinct values and 184 blank cells in the same column of the
+                same table. */}
+            {perColumn.length > 0 && legend && (
+              <div className={facts.length > 0 ? "mt-3 border-t border-line/60 pt-2.5" : ""}>
+                <p className="mb-1 text-micro text-faint">
+                  <Term name={legend.term}>{legend.heading}</Term>
+                </p>
                 <ul className="space-y-0.5">
-                  {Object.entries(step.facts.per_column ?? {}).map(([column, count]) => (
-                    <li
-                      key={column}
-                      className="flex justify-between gap-2 font-mono text-[11.5px]"
-                    >
-                      <span className="truncate text-muted">{column}</span>
-                      <span className="tnum shrink-0 text-text">{count.toLocaleString()}</span>
+                  {perColumn.map(([column, value]) => (
+                    <li key={column} className="flex justify-between gap-2 text-meta">
+                      <span className="truncate font-mono text-muted">{column}</span>
+                      <span className="tnum shrink-0 text-text">
+                        {value.toLocaleString()}{" "}
+                        <span className="text-faint">
+                          {legend.unit}
+                          {value === 1 ? "" : "s"}
+                        </span>
+                      </span>
                     </li>
                   ))}
                 </ul>
-              </Disclosure>
+              </div>
             )}
+          </Layer>
+        )}
+
+        {/* ----------------------------------------------- layer 3: the mechanism */}
+        <Layer
+          icon={<Settings2 size={11} className="shrink-0" />}
+          label="How it works, and what you can change"
+        >
+          <div className="space-y-3">
+            <p className="text-[12.5px] leading-relaxed text-muted">{step.explanation}</p>
+            <StepOptions step={step} config={config} onChange={onConfigChange} />
           </div>
+        </Layer>
+
+        {/* ---------------------------------------------------- layer 4: the code */}
+        {codeLine !== null && (
+          <button
+            onClick={() => onJumpToLine(codeLine)}
+            className="flex w-full items-center gap-1.5 py-1 text-ui text-muted transition-colors hover:text-accent"
+          >
+            <Code2 size={11} className="shrink-0" />
+            See the code that does this
+            <span className="tnum ml-auto shrink-0 font-mono text-micro text-faint">
+              line {codeLine}
+            </span>
+          </button>
         )}
       </div>
     </li>
@@ -629,16 +765,22 @@ function StepCard({
 
 export function PipelinePanel({
   workspace,
+  roomy,
   onConfigChange,
   onRequestImpact,
+  onJumpToLine,
   impact,
   impactLoading,
   onConfirmImpact,
   onCancelImpact,
 }: {
   workspace: Workspace;
+  /** True in the Explain layout, where this panel has the centre column's width. */
+  roomy: boolean;
   onConfigChange: (next: PipelineConfig, summary?: string) => void;
   onRequestImpact: (step: StepId, enabled: boolean) => void;
+  /** Reveal a line of the generated pipeline in the editor. */
+  onJumpToLine: (line: number) => void;
   impact: ImpactReport | null;
   impactLoading: boolean;
   onConfirmImpact: () => void;
@@ -670,15 +812,31 @@ export function PipelinePanel({
           </div>
         )}
 
-        <ol className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-3">
+        {/* In the Explain layout this panel is the centre column, so the cards sit two
+            across rather than stretching one explanation to 690px.
+
+            `auto-rows-max` is load-bearing. A grid row defaults to `auto`, and a card
+            carries `overflow-hidden`, which sets its automatic minimum size to zero —
+            so once the cards needed more height than this scroller has, the rows shrank
+            to fit instead of overflowing and every card was clipped mid-sentence.
+            Sizing rows to their content puts the overflow back where it belongs, on the
+            scroller. */}
+        <ol
+          className={`min-h-0 flex-1 overflow-y-auto p-3 ${
+            roomy ? "grid auto-rows-max content-start gap-2 2xl:grid-cols-2" : "space-y-1.5"
+          }`}
+        >
           {workspace.steps.map((step, index) => (
             <StepCard
               key={step.id}
               step={step}
               index={index}
               config={workspace.config}
+              code={workspace.code}
+              totalRows={workspace.dataset.rows}
               onToggle={(next) => onRequestImpact(step.id, next)}
               onConfigChange={(next) => onConfigChange(next)}
+              onJumpToLine={onJumpToLine}
             />
           ))}
         </ol>

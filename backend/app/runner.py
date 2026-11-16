@@ -53,6 +53,7 @@ from sklearn.preprocessing import (
 from sklearn.utils.validation import check_is_fitted
 
 from app.config import OUTLIER_IQR_MULTIPLIER, TARGET_ENCODER_CV
+from app.services import metafeatures
 from app.plan import ColumnPlan, PreprocessingPlan, prepare
 from app.services.glassbox import (
     DatetimeFeatures,
@@ -489,9 +490,52 @@ def build_schema(plan: PreprocessingPlan, raw: pd.DataFrame, out: pd.DataFrame) 
             for entry in plan.columns
         ],
         "output_features": [str(c) for c in out.columns],
+        "feature_sources": _feature_sources(plan, out),
         "n_features": int(out.shape[1]),
         "options": plan.options.model_dump(),
+        # Stage 4's description of the dataset, recorded here so a recommendation can be
+        # made later without re-reading the file — which may by then have been deleted,
+        # and which would in any case describe the data as it is now rather than as it
+        # was when this run happened.
+        #
+        # Measured on `raw`, the frame as uploaded, not on `out`. After preprocessing
+        # every column is numeric and `n_categorical` would be zero for every run ever
+        # recorded. See services/metafeatures.py.
+        "meta_features": metafeatures.extract(raw, plan.target, plan.task),
     }
+
+
+def _feature_sources(plan: PreprocessingPlan, out: pd.DataFrame) -> dict[str, str | None]:
+    """Which input column produced each output feature.
+
+    ``output_features`` is a flat list of names, which is all the inference contract needs
+    — but it loses the thing a reader most wants to know: that ``Embarked`` became three
+    columns, or that one datetime column became twelve. Recovering that in the client by
+    matching name prefixes is fragile, so it is derived here, once, from the plan.
+
+    Derived rather than recorded because the transformers name their own outputs; this
+    matches those names back to the entry that produced them. An exact match wins first,
+    then the **longest** input name that the output extends with an underscore — so a file
+    holding both ``Boarded`` and ``Boarded_hour`` attributes ``Boarded_hour_sin`` to
+    ``Boarded_hour``, not to ``Boarded``.
+
+    A feature that matches nothing maps to ``None``. That is honest and rare: it means a
+    transformer invented a name this function cannot attribute, which a reader should see
+    as unknown rather than as a guess.
+    """
+    inputs = [entry.column for entry in plan.columns]
+    by_name = set(inputs)
+    sources: dict[str, str | None] = {}
+
+    for column in out.columns:
+        name = str(column)
+        if name in by_name:
+            sources[name] = name
+            continue
+        candidates = [c for c in inputs if name.startswith(f"{c}_")]
+        sources[name] = max(candidates, key=len) if candidates else None
+
+    return sources
 
 
 def verify_log_invariant(plan: PreprocessingPlan, log: list[dict[str, Any]]) -> None:

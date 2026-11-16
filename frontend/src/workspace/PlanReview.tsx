@@ -40,9 +40,16 @@ import {
   type Histogram,
   type Plan,
   type PlanAction,
+  type PlanOptions,
   type PlanWarning,
   type Run,
 } from "../api";
+// Note: `Tooltip` in this file is recharts', not ours. The vocabulary tooltip arrives
+// through `Term`, which wraps the shared one, so the two never have to share a name.
+import { Code2 } from "lucide-react";
+import { describeStats } from "../explain/stats";
+import { Mechanism } from "../explain/Mechanism";
+import { Term } from "../explain/Term";
 import {
   Badge,
   Button,
@@ -201,6 +208,8 @@ function ColumnRow({
   expanded,
   onToggle,
   profile,
+  options: planOptions,
+  scriptUrl,
 }: {
   column: ColumnPlan;
   pending: PlanAction | undefined;
@@ -209,6 +218,10 @@ function ColumnRow({
   expanded: boolean;
   onToggle: () => void;
   profile: ColumnProfile | undefined;
+  /** Needed to say whether a scaler runs after this column's own step. */
+  options: PlanOptions;
+  /** The generated script from the latest run, when there has been one. */
+  scriptUrl: string | null;
 }) {
   const action = pending ?? column.action;
   const changed = pending !== undefined && pending !== column.action;
@@ -295,34 +308,87 @@ function ColumnRow({
               {column.warning.suggestion}
             </span>
           ) : null}
+
+          {/* Overriding replaces the derived reason with "You chose …", which reads as
+              an explanation and is not one. The phase 6 comprehension test caught this
+              on Age: a reader could say what would happen and could not say whether it
+              was a good idea. The honest answer is that nothing here measures a single
+              column's choice, so this says so rather than implying it was weighed. */}
+          {column.overridden ? (
+            <span className="mt-1 block text-micro leading-relaxed text-faint">
+              Nothing measures the effect of one column's treatment. The workspace
+              measures whole steps being switched on or off; this choice is yours and is
+              taken as given.
+            </span>
+          ) : null}
         </td>
       </tr>
 
       {expanded ? (
         <tr className="border-t border-line/50 bg-sunken">
           <td colSpan={6} className="px-3 py-3">
-            <div className="grid gap-4 md:grid-cols-2">
+            {/* The four layers, in the order a reader needs them. The row above is
+                layer 1, the glance. Here: what it was decided from, what it does to
+                the values, the shape of the column, and a way through to the code. */}
+            <div className="grid gap-5 lg:grid-cols-3">
               <div>
                 <p className="mb-2 text-xs font-medium text-muted">
                   What this was measured from
                 </p>
-                <div className="grid grid-cols-2 gap-2">
-                  {Object.entries(column.stats).map(([key, value]) => (
-                    <Fact
-                      key={key}
-                      label={key.replace(/_/g, " ")}
-                      value={String(value)}
-                    />
+                {/* These were `Object.entries(column.stats)` with the underscores
+                    swapped for spaces, which put "top share 0.577" and "rows measured
+                    712" in front of the reader. `describeStats` gives each one a label
+                    in words and, where the number means something for this particular
+                    column, a sentence saying what. */}
+                <dl className="space-y-2">
+                  {describeStats(column, profile?.n_rows).map((stat) => (
+                    <div key={stat.key}>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <dt
+                          className={`text-meta ${
+                            stat.emphasis ? "font-medium text-text" : "text-muted"
+                          }`}
+                        >
+                          {stat.term ? (
+                            <Term name={stat.term}>{stat.label}</Term>
+                          ) : (
+                            stat.label
+                          )}
+                        </dt>
+                        <dd
+                          className={`tnum shrink-0 font-mono text-meta ${
+                            stat.emphasis ? "text-accent" : "text-text"
+                          }`}
+                        >
+                          {stat.value}
+                        </dd>
+                      </div>
+                      {stat.meaning && (
+                        <p className="mt-0.5 text-micro leading-relaxed text-faint">
+                          {stat.meaning}
+                        </p>
+                      )}
+                    </div>
                   ))}
-                </div>
-                <p className="mt-2 text-[11px] text-faint">
-                  Measured on the training rows only — the held-out rows take no part in
-                  deciding what happens to this column.
-                </p>
+                </dl>
               </div>
+              <Mechanism column={column} profile={profile} options={planOptions} />
+
               <div>
-                <p className="mb-2 text-xs font-medium text-muted">Distribution</p>
+                <p className="mb-2 text-ui font-medium text-muted">
+                  How the values are spread
+                </p>
                 <ColumnHistogram histogram={profile?.histogram} />
+                {scriptUrl && (
+                  <a
+                    href={scriptUrl}
+                    className="mt-3 inline-flex items-center gap-1.5 text-micro text-muted
+                      underline decoration-dotted underline-offset-2 transition-colors hover:text-accent"
+                  >
+                    <Code2 size={11} aria-hidden />
+                    See the code that does this
+                  </a>
+                )}
               </div>
             </div>
           </td>
@@ -694,6 +760,14 @@ export function PlanReview({
                       setEdits((previous) => ({ ...previous, [column.column]: action }))
                     }
                     profile={profiles[column.column]}
+                    options={plan.options}
+                    scriptUrl={
+                      // Layer 4 only exists once there is a run to read it from. No
+                      // link rather than a dead one before the plan has been executed.
+                      run?.status === "succeeded" && run.artifacts.includes("script")
+                        ? api.artifactUrl(run.id, "script")
+                        : null
+                    }
                     expanded={expanded === column.column}
                     onToggle={() =>
                       setExpanded((previous) =>

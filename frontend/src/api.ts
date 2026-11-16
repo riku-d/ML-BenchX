@@ -147,6 +147,15 @@ export type StepFacts = {
   majority?: string;
   minority?: string;
   share?: number;
+  /**
+   * Data Type Detection only.
+   *
+   * `text_date_columns` is sent but is not measured — `impact.step_facts` initialises
+   * it to zero and never increments it — so it is declared here to match the payload
+   * and deliberately not displayed anywhere.
+   */
+  text_numeric_columns?: number;
+  text_date_columns?: number;
 };
 
 export type StepView = {
@@ -438,12 +447,18 @@ export type RunChecks = {
       test_share: number;
       delta: number;
     }[];
+    /** Sent by the server; declared so the narrative can read them. */
+    train_rows?: number;
+    test_rows?: number;
+    balanced?: boolean;
     warnings: PlanWarning[];
   } | null;
   baseline?: {
     task: string;
     metric: string;
     folds: number;
+    /** Every model tried, keyed by name. The two named below come out of it. */
+    scores?: Record<string, number>;
     baseline: number;
     model: string;
     model_score: number;

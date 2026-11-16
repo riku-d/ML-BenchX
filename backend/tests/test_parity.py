@@ -337,3 +337,56 @@ def test_the_script_carries_the_plan_as_editable_data(mixed) -> None:
     assert [c["action"] for c in document["columns"]] == [
         c.action for c in plan.columns
     ]
+
+
+# --------------------------------------------------------------------------------------
+# Placeholders, where the two paths each decide what a string means
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def placeholder_words(tmp_path: Path) -> tuple[pd.DataFrame, Path]:
+    """A frame whose text columns exercise both halves of the placeholder rule.
+
+    This is the divergence this file exists to catch, in its sharpest form: whether a
+    string is data or the absence of data is now decided from how often it occurs, and
+    the engine decides it in :mod:`app.services.ingest` while the script decides it again
+    in its own emitted source. Two implementations of one rule is exactly the shape of
+    the defect described at the top of this module, so the frame below is built to make
+    any disagreement move the output hash.
+    """
+    rng = np.random.default_rng(31)
+    n = 400
+    frame = pd.DataFrame({
+        # A word that is most of the column: a level in both paths, or neither.
+        "own_telephone": ["none"] * 240 + ["yes"] * 160,
+        # The same word, rare: a blank in both paths, or neither.
+        "guarantor": ["none"] * 12 + ["yes"] * 388,
+        # A notation at a share above the word threshold: always a blank.
+        "late_fee": ["?"] * 120 + ["12"] * 280,
+        "amount": rng.normal(100, 25, n).round(3),
+        "label": rng.choice([0, 1], n, p=[0.45, 0.55]),
+    })
+
+    path = tmp_path / "placeholders.csv"
+    frame.to_csv(path, index=False)
+    return read_upload(path.read_bytes(), "placeholders.csv").frame, path
+
+
+def test_the_fixture_actually_exercises_both_halves_of_the_rule(placeholder_words) -> None:
+    """Guards the parity test below: if ingestion blanked or kept everything, the
+    comparison would pass while proving nothing."""
+    frame, _ = placeholder_words
+
+    assert int(frame["own_telephone"].isna().sum()) == 0, "the common word was blanked"
+    assert int(frame["guarantor"].isna().sum()) == 12, "the rare word was not blanked"
+    assert int(frame["late_fee"].isna().sum()) == 120, "the notation was not blanked"
+
+
+def test_placeholder_decisions_are_identical_in_both_paths(
+    placeholder_words, workspace
+) -> None:
+    frame, path = placeholder_words
+    plan = propose(frame, "label", "binary classification")
+
+    assert_parity(plan, frame, path, workspace)

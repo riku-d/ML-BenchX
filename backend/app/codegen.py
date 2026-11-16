@@ -38,6 +38,7 @@ import textwrap
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.config import MISSING_MARKERS, MISSING_WORDS, PLACEHOLDER_WORD_MAX_SHARE
 from app.pipeline import PipelineConfig
 
 __all__ = ["generate", "GENERATED_HEADER", "SourceFormat"]
@@ -158,13 +159,28 @@ _DATA_TYPES = '''
 # "10" < "9".
 # ---------------------------------------------------------------------------------
 
-MISSING_TOKENS = {{"", "-", "--", "?", "n/a", "na", "nan", "none", "null", "nil",
-                  "unknown", "not available", "missing", "#n/a", "tbd", "no data", "."}}
+# Text that means "no value", in two kinds. MISSING_MARKERS are notations for absence --
+# an empty cell, "?", "null", "nan" -- and mean a gap however often they appear.
+# MISSING_WORDS are ordinary words that mean a gap only when they are a small share of
+# what is written in the column: "none" is the negative half of a yes/no column far more
+# often than it is a missing value, and blanking it wholesale drops the column.
+MISSING_MARKERS = {markers!r}
+MISSING_WORDS = {words!r}
+PLACEHOLDER_WORD_MAX_SHARE = {max_share!r}
 
 for _column in df.columns:
-    if df[_column].dtype == object:
-        _normalised = df[_column].astype("string").str.strip().str.lower()
-        df.loc[_normalised.isin(MISSING_TOKENS), _column] = np.nan
+    if df[_column].dtype != object:
+        continue
+    _present = df[_column].notna()
+    _written = int(_present.sum())
+    if not _written:
+        continue
+    _normalised = df[_column].astype("string").str.strip().str.lower()
+    _tokens = list(MISSING_MARKERS)
+    for _word in MISSING_WORDS:
+        if int((_normalised[_present] == _word).sum()) / _written <= PLACEHOLDER_WORD_MAX_SHARE:
+            _tokens.append(_word)
+    df.loc[_normalised.isin(_tokens) & _present, _column] = np.nan
 '''
 
 _COERCE_NUMERIC = '''
@@ -763,7 +779,13 @@ def generate(config: PipelineConfig, source: SourceFormat | None = None) -> str:
     ]
 
     # --- always on: the rest of the pipeline is meaningless without column kinds ----
-    parts.append(_DATA_TYPES.format())
+    parts.append(
+        _DATA_TYPES.format(
+            markers=sorted(MISSING_MARKERS),
+            words=sorted(MISSING_WORDS),
+            max_share=PLACEHOLDER_WORD_MAX_SHARE,
+        )
+    )
     if config.data_types.coerce_numeric:
         parts.append(_COERCE_NUMERIC)
     # Always on, and independent of the toggle above: a float column read straight from

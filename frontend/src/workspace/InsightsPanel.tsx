@@ -10,7 +10,7 @@
  * is the honest answer to "did this help?", including when the answer is no.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -21,8 +21,12 @@ import {
   ShieldCheck,
   ShieldAlert,
 } from "lucide-react";
-import type { Compilation, Health, HealthDimension, Workspace } from "../api";
-import { Badge, Delta, Meter, ScoreRing, Tabs } from "../components/ui";
+import { api, type Compilation, type Health, type HealthDimension, type Run, type Workspace } from "../api";
+import { Badge, Delta, Meter, ScoreRing, Spinner, Tabs } from "../components/ui";
+import { describeChecks, provenance } from "../explain/checks";
+import { describeDimension } from "../explain/health";
+import { narrate } from "../explain/narrative";
+import { Term } from "../explain/Term";
 
 function toneFor(score: number) {
   if (score >= 90) return "good" as const;
@@ -31,52 +35,65 @@ function toneFor(score: number) {
   return "danger" as const;
 }
 
-/** The evidence behind one dimension, rendered from whatever facts it reported. */
+/**
+ * The evidence behind one dimension.
+ *
+ * Previously this pushed a fixed list of scalar keys and returned early on anything
+ * that was not a number or a flat array — which threw away the only facts that said
+ * *where* a problem was. `worst_columns`, `per_column_outliers`, `skew` and
+ * `mixed_type_columns` are all nested, so all four were dropped: the panel could tell
+ * you the dataset had 170 outliers and 2 heavily skewed columns, and could not tell you
+ * which columns. `describeDimension` reads them, names the columns, and attaches the
+ * meaning to the number instead of leaving "Scale disparity 359.15" to be interpreted.
+ */
 function DimensionFacts({ dimension }: { dimension: HealthDimension }) {
-  const facts = dimension.facts as Record<string, unknown>;
-  const rows: [string, string][] = [];
+  const { facts, columnsHeading, columns, notes } = describeDimension(dimension);
 
-  const push = (label: string, value: unknown) => {
-    if (value === undefined || value === null) return;
-    if (Array.isArray(value)) {
-      if (value.length === 0) return;
-      rows.push([label, value.slice(0, 4).map(String).join(", ")]);
-      return;
-    }
-    if (typeof value === "object") return;
-    rows.push([label, typeof value === "number" ? value.toLocaleString() : String(value)]);
-  };
-
-  push("Missing cells", facts.missing_cells);
-  push("Columns with gaps", facts.columns_with_gaps);
-  push("Outliers", facts.outliers);
-  push("Infinite values", facts.infinite);
-  push("Duplicate rows", facts.duplicate_rows);
-  push("Constant columns", facts.constant_columns);
-  push("Identifier-like", facts.identifier_columns);
-  push("Numeric columns", facts.numeric_columns);
-  push("Scale disparity", facts.scale_disparity);
-  push("Features", facts.feature_count);
-
-  const redundant = facts.redundant_pairs as { columns: string[]; correlation: number }[] | undefined;
-  const leaks = facts.leakage_suspects as { column: string; correlation: number }[] | undefined;
+  if (facts.length === 0 && columns.length === 0 && notes.length === 0) {
+    return (
+      <p className="mt-2 text-[11.5px] text-faint">
+        This dimension reported nothing beyond its score.
+      </p>
+    );
+  }
 
   return (
-    <div className="mt-2 space-y-1">
-      {rows.map(([label, value]) => (
-        <div key={label} className="flex justify-between gap-3 text-[11.5px]">
-          <span className="text-faint">{label}</span>
-          <span className="tnum truncate font-mono text-muted">{value}</span>
+    <div className="mt-2.5 space-y-2.5">
+      {facts.length > 0 && (
+        <dl className="space-y-2">
+          {facts.map((fact) => (
+            <div key={fact.label}>
+              <div className="flex justify-between gap-3">
+                <dt className="text-micro text-faint">
+                  <Term name={fact.term}>{fact.label}</Term>
+                </dt>
+                <dd className="tnum shrink-0 font-mono text-meta text-text">{fact.value}</dd>
+              </div>
+              {fact.meaning && (
+                <dd className="mt-0.5 text-micro leading-relaxed text-faint">{fact.meaning}</dd>
+              )}
+            </div>
+          ))}
+        </dl>
+      )}
+
+      {columns.length > 0 && (
+        <div className="border-t border-line/60 pt-2.5">
+          {columnsHeading && <p className="mb-1 text-micro text-faint">{columnsHeading}</p>}
+          <ul className="space-y-0.5">
+            {columns.map((finding) => (
+              <li key={finding.column} className="flex justify-between gap-3 text-meta">
+                <span className="truncate font-mono text-muted">{finding.column}</span>
+                <span className="tnum shrink-0 text-right text-faint">{finding.detail}</span>
+              </li>
+            ))}
+          </ul>
         </div>
-      ))}
-      {leaks?.map((leak) => (
-        <p key={leak.column} className="text-[11.5px] text-danger">
-          {leak.column} correlates {leak.correlation} with the target
-        </p>
-      ))}
-      {redundant?.slice(0, 3).map((pair) => (
-        <p key={pair.columns.join()} className="font-mono text-[11.5px] text-faint">
-          {pair.columns[0]} ≈ {pair.columns[1]} ({pair.correlation})
+      )}
+
+      {notes.map((note) => (
+        <p key={note} className="text-micro leading-relaxed text-faint">
+          {note}
         </p>
       ))}
     </div>
@@ -199,6 +216,251 @@ function SplitCard({ split }: { split: NonNullable<Compilation["result"]>["split
         made, so nothing in them influenced this pipeline.
       </p>
     </section>
+  );
+}
+
+/**
+ * "What happened to your data" — the compile as a story, then what was checked.
+ *
+ * Two sources, and they are kept apart on purpose. The sequence and the before/after
+ * come from this workspace's compile. The checks come from a **plan run**, which is a
+ * different execution that may have happened at a different time against a different
+ * version of the plan — so they sit under their own heading with the date and version
+ * they belong to, and a plain warning when the run predates the compile. Presenting the
+ * two as one event would be the kind of quiet elision this product exists to refuse.
+ */
+function Narrative({
+  compilation,
+  datasetId,
+}: {
+  compilation: Compilation;
+  datasetId: string;
+}) {
+  const [run, setRun] = useState<Run | null>(null);
+  const [runState, setRunState] = useState<"loading" | "none" | "ready" | "error">("loading");
+
+  useEffect(() => {
+    let current = true;
+    setRunState("loading");
+    api
+      .listRuns(datasetId)
+      .then((listed) => {
+        const latest = listed.runs
+          .filter((entry) => entry.status === "succeeded")
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+        if (!latest) {
+          if (current) setRunState("none");
+          return;
+        }
+        // The listing is a summary — it carries no `checks` — so the chosen run has to
+        // be read in full before anything can be said about it.
+        return api.readRun(latest.id).then((full) => {
+          if (!current) return;
+          setRun(full);
+          setRunState("ready");
+        });
+      })
+      .catch(() => {
+        if (current) setRunState("error");
+      });
+    return () => {
+      current = false;
+    };
+  }, [datasetId]);
+
+  const moments = narrate(compilation.result.steps);
+  const comparison = compilation.result.comparison;
+  const cards = run ? describeChecks(run) : [];
+
+  // `comparison` is optional on a successful compile, so the shape before and after
+  // falls back to the raw counts. Health has no fallback — without a comparison there
+  // is no "before" to quote, and inventing one would be worse than omitting it.
+  const started = comparison
+    ? { rows: comparison.rows.before, columns: comparison.columns.before, score: comparison.score.before }
+    : compilation.result.rows_before != null && compilation.result.columns_before != null
+      ? { rows: compilation.result.rows_before, columns: compilation.result.columns_before, score: null }
+      : null;
+  const ended = comparison
+    ? { rows: comparison.rows.after, columns: comparison.columns.after, score: comparison.score.after }
+    : compilation.result.rows_after != null && compilation.result.columns_after != null
+      ? { rows: compilation.result.rows_after, columns: compilation.result.columns_after, score: null }
+      : null;
+
+  return (
+    <div>
+      <p className="font-display text-[11px] tracking-[0.13em] text-faint uppercase">
+        What happened to your data
+      </p>
+      <p className="mt-1 text-micro text-faint">
+        Compiled from the {compilation.source} in {compilation.duration_ms} ms.
+      </p>
+
+      {/* ------------------------------------------------- where it started and ended */}
+      {started && ended && (
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          {[
+            { label: "You started with", ...started },
+            { label: "You ended with", ...ended },
+          ].map((side) => (
+            <div key={side.label} className="card p-2.5">
+              <p className="text-micro text-faint">{side.label}</p>
+              <p className="tnum mt-1 font-mono text-meta text-text">
+                {side.rows.toLocaleString()} × {side.columns}
+              </p>
+              {side.score !== null && (
+                <p className="tnum mt-0.5 font-mono text-micro text-faint">
+                  health {side.score}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------ the sequence */}
+      <ol className="mt-4 space-y-0">
+        {moments.map((moment) =>
+          moment.kind === "split" ? (
+            // The claim the whole product rests on. In the old list this was one grey
+            // row between two others, which is not how you present your own thesis.
+            <li key={moment.key} className="my-2 rounded-lg border border-accent/35 bg-accent/5 px-2.5 py-2">
+              <p className="flex items-center gap-1.5 text-ui font-medium text-accent">
+                <Scissors size={11} className="shrink-0" />
+                <Term name="the split">The split</Term>
+              </p>
+              <p className="mt-1 text-meta leading-snug text-text">{moment.action}</p>
+              <p className="mt-1 text-micro leading-relaxed text-faint">
+                Everything below this line learned from the training rows alone. That is
+                what makes the held-out rows an honest test.
+              </p>
+            </li>
+          ) : (
+            <li key={moment.key} className="flex gap-2.5">
+              {/* The thread down the left is what makes this a sequence rather than a
+                  list of cards that happen to be stacked. */}
+              <div className="flex shrink-0 flex-col items-center pt-[7px]">
+                <span className="h-1.5 w-1.5 rounded-full bg-hairline" />
+                <span className="w-px flex-1 bg-line" />
+              </div>
+              <div className="min-w-0 flex-1 pb-3">
+                <div className="flex items-baseline gap-2">
+                  <span className="flex-1 truncate text-ui text-text">{moment.title}</span>
+                  {moment.columnsDelta !== null && moment.columnsDelta !== 0 && (
+                    <span
+                      className={`tnum shrink-0 font-mono text-micro ${
+                        moment.columnsDelta > 0 ? "text-good" : "text-warn"
+                      }`}
+                    >
+                      {moment.columnsDelta > 0 ? "+" : ""}
+                      {moment.columnsDelta} col
+                    </span>
+                  )}
+                  {moment.rowsDelta !== null && moment.rowsDelta !== 0 && (
+                    <span className="tnum shrink-0 font-mono text-micro text-warn">
+                      {moment.rowsDelta > 0 ? "+" : ""}
+                      {moment.rowsDelta.toLocaleString()} rows
+                    </span>
+                  )}
+                </div>
+                <p className="mt-0.5 text-meta leading-snug text-muted">{moment.action}</p>
+                {moment.touched.length > 0 && (
+                  <p className="mt-0.5 truncate font-mono text-micro text-faint">
+                    {moment.touched.slice(0, 4).join(", ")}
+                    {moment.touched.length > 4 ? `, +${moment.touched.length - 4}` : ""}
+                  </p>
+                )}
+              </div>
+            </li>
+          ),
+        )}
+      </ol>
+
+      {comparison && (
+        <p className="border-t border-line pt-2.5 text-meta leading-relaxed text-muted">
+          Dataset health moved from {comparison.score.before} to {comparison.score.after}
+          {comparison.score.delta === 0
+            ? ", unchanged."
+            : `, ${comparison.score.delta > 0 ? "up" : "down"} ${Math.abs(comparison.score.delta)}.`}{" "}
+          The Health tab takes that apart dimension by dimension.
+        </p>
+      )}
+
+      {/* ----------------------------------------------------- checks from a plan run */}
+      <section className="mt-5 border-t border-line pt-3">
+        <h3 className="font-display text-[11px] tracking-[0.13em] text-faint uppercase">
+          What was checked afterwards
+        </h3>
+
+        {runState === "loading" && (
+          <p className="mt-2 flex items-center gap-2 text-meta text-muted">
+            <Spinner size={11} /> looking for a plan run…
+          </p>
+        )}
+
+        {runState === "none" && (
+          <p className="mt-2 text-meta leading-relaxed text-faint">
+            This plan has never been executed, so there is nothing independent to report.
+            Running it from <span className="text-muted">Review the plan</span> produces a
+            drift check, a balance check and a baseline comparison.
+          </p>
+        )}
+
+        {runState === "error" && (
+          <p className="mt-2 text-meta leading-relaxed text-faint">
+            The run history could not be read, so these checks are not shown. Nothing
+            above depends on it.
+          </p>
+        )}
+
+        {runState === "ready" && run && (
+          <>
+            <p className="mt-1.5 text-micro leading-relaxed text-faint">{provenance(run)}</p>
+            {/* A plan run and a compile are two different executions, and which came
+                first changes what these checks can be taken to mean. Saying so in both
+                directions costs a line; letting a reader assume they are the same event
+                costs them the thing this panel is for. */}
+            <p className="mt-1.5 flex gap-1.5 text-micro leading-relaxed text-warn">
+              <AlertTriangle size={11} className="mt-[1px] shrink-0" />
+              {run.created_at < compilation.created_at
+                ? "That run is older than this compile, so these checks describe an earlier version of the pipeline — not the sequence above."
+                : "A plan run is a separate execution from this compile. These checks describe that run, which may not match the sequence above."}
+            </p>
+
+            <div className="mt-2.5 space-y-2">
+              {cards.map((card) => (
+                <div key={card.key} className="card p-2.5">
+                  <div className="flex items-start gap-1.5">
+                    {card.tone === "good" ? (
+                      <ShieldCheck size={12} className="mt-[2px] shrink-0 text-good" />
+                    ) : card.tone === "warn" ? (
+                      <AlertTriangle size={12} className="mt-[2px] shrink-0 text-warn" />
+                    ) : (
+                      <Info size={12} className="mt-[2px] shrink-0 text-info" />
+                    )}
+                    <p className="flex-1 text-ui font-medium text-text">{card.title}</p>
+                  </div>
+                  <p className="mt-1.5 text-meta leading-relaxed text-text">{card.verdict}</p>
+                  {card.detail.length > 0 && (
+                    <ul className="mt-1.5 space-y-0.5">
+                      {card.detail.map((line) => (
+                        <li key={line} className="text-micro leading-relaxed text-faint">
+                          {line}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {card.note && (
+                    <p className="mt-1.5 border-t border-line/60 pt-1.5 text-micro leading-relaxed text-faint">
+                      {card.note}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -388,47 +650,7 @@ export function InsightsPanel({ workspace }: { workspace: Workspace }) {
                 </p>
               </div>
             ) : (
-              <>
-                <div className="grid grid-cols-2 gap-2">
-                  {[
-                    ["Rows", compilation.result.rows_before, compilation.result.rows_after],
-                    ["Columns", compilation.result.columns_before, compilation.result.columns_after],
-                  ].map(([label, before, after]) => (
-                    <div key={String(label)} className="card p-2.5">
-                      <p className="text-[11px] text-faint">{label as string}</p>
-                      <p className="tnum mt-1 font-mono text-[15px] text-text">
-                        {(before as number)?.toLocaleString()}
-                        <span className="mx-1 text-faint">→</span>
-                        {(after as number)?.toLocaleString()}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-
-                <p className="mt-4 mb-2 font-display text-[11px] tracking-[0.13em] text-faint uppercase">
-                  What each step did
-                </p>
-                <ol className="space-y-1">
-                  {(compilation.result.steps ?? []).map((step, index) => (
-                    <li key={`${step.step}-${index}`} className="card px-2.5 py-2">
-                      <div className="flex items-baseline gap-2">
-                        <span className="tnum w-3.5 shrink-0 font-mono text-[10px] text-faint">
-                          {index + 1}
-                        </span>
-                        <span className="flex-1 font-mono text-[11.5px] text-accent">
-                          {step.step}
-                        </span>
-                        <span className="tnum shrink-0 font-mono text-[10.5px] text-faint">
-                          {step.rows.toLocaleString()}×{step.columns}
-                        </span>
-                      </div>
-                      <p className="mt-0.5 pl-5 text-[12px] leading-snug text-muted">
-                        {step.action}
-                      </p>
-                    </li>
-                  ))}
-                </ol>
-              </>
+              <Narrative compilation={compilation} datasetId={workspace.dataset.id} />
             )}
           </div>
         )}

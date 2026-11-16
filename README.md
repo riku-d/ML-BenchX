@@ -108,7 +108,11 @@ your file ──▶ ingest ──▶ store ──▶ profile ──▶ SPLIT ─
 3. **Profiles every column** — missing share, cardinality, IQR outliers — plus duplicate
    rows, highly correlated pairs and class imbalance, and scores the file out of 100.
 4. **Guesses the target** from your plain-English goal by string matching — no LLM, no
-   network. The guess is always shown with a way to change it.
+   network today. The guess is always shown with a way to change it. A natural-language
+   goal interface backed by Gemini Flash-Lite is funded for **Dec 2026**, under rules that
+   do not change this guarantee: only column names and aggregate statistics are sent,
+   never a data row; string matching stays as the offline fallback; local operation keeps
+   it off entirely.
 5. **Sets aside 20% of the rows** before anything at all is measured.
 6. **Prepares the columns** — fills gaps, encodes labels, builds calendar features, puts
    numbers on one scale — learning every value from the training rows alone.
@@ -354,7 +358,7 @@ backend/
     sample/campus_records.csv  the bundled example — deliberately messy
     services/
       ingest.py              read the file, repair the format, score quality
-      target.py              plain-English goal -> column, no LLM
+      target.py              plain-English goal -> column, no LLM (see Deliberate limits)
       screening.py           identifier and target-leakage screens
       profile.py             per-column measurements for the dashboard
       health.py              the six dimensions
@@ -409,15 +413,28 @@ Three columns on a desktop, one column with a tab bar below 1024px. Verified at 
 
 ---
 
-## Deliberate limits
+## Deliberate limits — and when each one lifts
+
+This is a glass-box preprocessing workbench today, and the first three stages of a
+seven-stage platform that the Institute Seed Grant funds across twelve months from
+October 2026. The limits below are real right now; three of them have a date.
+
+Directing documents: the **Institute Seed Grant proposal** (PI Deblina Chowdhury,
+Heritage Institute of Technology) and the **Project I semester report**
+`DSC3295-23-27-T15_Sem;colon_report1.pdf`. Month-by-month delivery and cost:
+[docs/EXECUTION_PLAN_OCT26_MAR27.md](docs/EXECUTION_PLAN_OCT26_MAR27.md).
 
 There is no authentication and no model training. Every table carries a `project_id`
 that is always `"default"` — the column exists so that adding accounts later is a
-migration rather than a redesign.
+migration rather than a redesign, and that is exactly what happens in **Q3 (Apr–Jun
+2027)**: four roles — Admin, Data Scientist, Collaborator, Viewer — a shared experiment
+dashboard, and PDF export. Model training arrives sooner, in **Feb 2027**.
 
 Compiling is synchronous. A pipeline on the file sizes this accepts finishes in about a
-second, and a job queue would be machinery with nothing to do; a dataset large enough to
-need one would need streaming ingestion first.
+second, and a job queue would be machinery with nothing to do. That stays true for
+preprocessing. Training six algorithms in parallel is a different workload — memory-bound
+and long-running — and gets a queue of its own: Celery over Redis on a separate worker
+server, **Feb 2027**.
 
 Uploads and fitted pipelines are written to the local filesystem through
 `StorageBackend`. `LocalStorage` is the only implementation; the interface exists so the

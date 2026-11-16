@@ -12,6 +12,7 @@ import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { Landing } from "./landing/Landing";
 import { UploadScreen } from "./workspace/UploadScreen";
 import { Workspace } from "./workspace/Workspace";
+import { parseViewMode, storeViewMode, type ViewMode } from "./explain/viewMode";
 
 /**
  * The plan screen is loaded on demand.
@@ -28,7 +29,8 @@ const PlanReview = lazy(() =>
 type Route =
   | { screen: "landing" }
   | { screen: "upload" }
-  | { screen: "workspace"; datasetId: string }
+  /** `view` is null until the workspace has resolved one — see `resolveViewMode`. */
+  | { screen: "workspace"; datasetId: string; view: ViewMode | null }
   | { screen: "plan"; datasetId: string };
 
 function parseHash(): Route {
@@ -38,8 +40,14 @@ function parseHash(): Route {
     if (datasetId) return { screen: "plan", datasetId };
   }
   if (hash.startsWith("workspace/")) {
-    const datasetId = hash.slice("workspace/".length);
-    if (datasetId) return { screen: "workspace", datasetId };
+    // `workspace/{id}?view=explain`. The id is read off the front rather than by
+    // splitting, so an unrecognised parameter cannot swallow the dataset.
+    const rest = hash.slice("workspace/".length);
+    const [datasetId, query = ""] = rest.split("?");
+    if (datasetId) {
+      const view = parseViewMode(new URLSearchParams(query).get("view"));
+      return { screen: "workspace", datasetId, view };
+    }
   }
   if (hash === "upload") return { screen: "upload" };
   return { screen: "landing" };
@@ -47,7 +55,10 @@ function parseHash(): Route {
 
 function toHash(route: Route): string {
   if (route.screen === "plan") return `#/plan/${route.datasetId}`;
-  if (route.screen === "workspace") return `#/workspace/${route.datasetId}`;
+  if (route.screen === "workspace") {
+    const query = route.view ? `?view=${route.view}` : "";
+    return `#/workspace/${route.datasetId}${query}`;
+  }
   if (route.screen === "upload") return "#/upload";
   return "#/";
 }
@@ -66,6 +77,22 @@ export default function App() {
     setRoute(next);
   }, []);
 
+  /**
+   * Record the workspace's layout in the URL without adding a history entry.
+   *
+   * Switching layout is not navigation — someone who flips to the code twice and then
+   * presses Back expects to leave the workspace, not to walk back through their own
+   * layout changes. `replaceState` keeps the URL shareable and reload-proof without
+   * filling the history stack. The mode is also stored, so the next dataset opens the
+   * way this reader last chose.
+   */
+  const setWorkspaceView = useCallback((datasetId: string, view: ViewMode, remember: boolean) => {
+    if (remember) storeViewMode(view);
+    const hash = toHash({ screen: "workspace", datasetId, view });
+    window.history.replaceState(null, "", hash);
+    setRoute({ screen: "workspace", datasetId, view });
+  }, []);
+
   if (route.screen === "plan") {
     return (
       <Suspense
@@ -78,7 +105,7 @@ export default function App() {
         <PlanReview
           key={route.datasetId}
           datasetId={route.datasetId}
-          onExit={() => go({ screen: "workspace", datasetId: route.datasetId })}
+          onExit={() => go({ screen: "workspace", datasetId: route.datasetId, view: null })}
         />
       </Suspense>
     );
@@ -89,6 +116,8 @@ export default function App() {
       <Workspace
         key={route.datasetId}
         datasetId={route.datasetId}
+        view={route.view}
+        onViewChange={(view, remember) => setWorkspaceView(route.datasetId, view, remember)}
         onExit={() => go({ screen: "upload" })}
         onReviewPlan={() => go({ screen: "plan", datasetId: route.datasetId })}
         onDeleted={() => go({ screen: "upload" })}
@@ -99,7 +128,7 @@ export default function App() {
   if (route.screen === "upload") {
     return (
       <UploadScreen
-        onReady={(dataset) => go({ screen: "workspace", datasetId: dataset.id })}
+        onReady={(dataset) => go({ screen: "workspace", datasetId: dataset.id, view: null })}
         onBack={() => go({ screen: "landing" })}
       />
     );

@@ -87,6 +87,7 @@ from app.services.screening import (
     target_leakage_screen,
 )
 from app.storage import StorageError, get_storage
+from app.metalearning_api import router as metalearning_router
 from app.planning_api import router as planning_router
 from app.workspace import router as workspace_router
 from app.services.target import (
@@ -204,6 +205,7 @@ def _safe_filename(name: str, fallback: str) -> str:
 
 app.include_router(workspace_router)
 app.include_router(planning_router)
+app.include_router(metalearning_router)
 
 
 @dataclass

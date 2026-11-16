@@ -462,6 +462,18 @@ def preview_impact(
     from actually running the pipeline the other way and assessing the result — which
     costs a second or so, and is the difference between a warning the user can trust and
     a number invented to look precise.
+
+    Those two sources can disagree, and when they do the measurement wins. The
+    consequences are computed from the dataset **as uploaded**; a step that operates
+    further down the pipeline sees a frame that earlier steps have already changed. Feature
+    selection is the case that exposed this: on ``titanic.csv`` it reported "no columns are
+    constant or redundant, so this step would remove nothing" beside a measured seven-point
+    drop, because the columns it actually removes are either text that is not yet encoded
+    or sine/cosine features that do not exist until the datetime step has run.
+
+    So where a report claims the step is doing nothing and the two runs say otherwise,
+    :func:`_correct_against_measurement` replaces the claim with what was observed. A
+    warning that is confidently wrong is worse than no warning at all.
     """
     workspace = _get_workspace(workspace_id, session)
     if request.step not in STEP_ORDER:
@@ -474,31 +486,99 @@ def preview_impact(
     proposed = config.model_copy(deep=True)
     getattr(proposed, request.step).enabled = request.enabled
 
-    current = _score_of(config, workspace)
-    projected = _score_of(proposed, workspace)
+    current, current_frame = _run_config(config, workspace)
+    projected, projected_frame = _run_config(proposed, workspace)
 
     report["current_score"] = current
     report["projected_score"] = projected
     report["delta"] = None if current is None or projected is None else projected - current
     report["enabling"] = request.enabled
+
+    _correct_against_measurement(report, current_frame, projected_frame)
     return report
 
 
-def _score_of(config: PipelineConfig, workspace: Workspace) -> int | None:
-    """Health of the dataset after running this configuration.
+def _correct_against_measurement(
+    report: dict[str, Any],
+    current_frame: pd.DataFrame | None,
+    projected_frame: pd.DataFrame | None,
+) -> None:
+    """Replace a "this does nothing" claim that the two pipeline runs contradict.
 
-    Returns ``None`` when the pipeline fails, which is itself information: the modal
-    shows "this configuration does not run" rather than a number that would imply it
-    does.
+    Only fires when the report says ``severity == "none"`` — that is the only case where
+    the text makes a positive claim that nothing happens. Everywhere else the existing
+    consequences are computed from the same frame the step reads, and are left alone.
+
+    Mutates ``report`` in place and records ``corrected_by_measurement`` so the client can
+    tell a measured sentence from a derived one.
+    """
+    report["corrected_by_measurement"] = False
+    if report.get("severity") != "none":
+        return
+    if current_frame is None or projected_frame is None:
+        return
+
+    before, after = list(current_frame.columns), list(projected_frame.columns)
+    lost = [c for c in before if c not in set(after)]
+    gained = [c for c in after if c not in set(before)]
+    delta = report.get("delta") or 0
+    if not lost and not gained and delta == 0:
+        return
+
+    def _name(columns: list[str]) -> str:
+        shown = ", ".join(str(c) for c in columns[:4])
+        return shown + (f", and {len(columns) - 4} more" if len(columns) > 4 else "")
+
+    lines: list[str] = []
+    if gained:
+        lines.append(
+            f"{len(gained)} column(s) this step currently removes would be kept: "
+            f"{_name(gained)}."
+        )
+    if lost:
+        lines.append(f"{len(lost)} column(s) would no longer be produced: {_name(lost)}.")
+    if not lines:
+        lines.append(
+            "The columns are unchanged, but the values in them are not — the health score "
+            "was measured on both and they differ."
+        )
+    lines.append(
+        "Measured by running the pipeline both ways. The step's own description did not "
+        "predict this, because it inspects the file as uploaded and this step runs after "
+        "earlier steps have already changed it."
+    )
+
+    report["consequences"] = lines
+    report["severity"] = "moderate" if abs(delta) >= 5 else "low"
+    report["corrected_by_measurement"] = True
+
+
+def _run_config(
+    config: PipelineConfig, workspace: Workspace
+) -> tuple[int | None, pd.DataFrame | None]:
+    """Health and resulting frame for this configuration, by running it.
+
+    Returns ``(None, None)`` when the pipeline fails, which is itself information: the
+    modal shows "this configuration does not run" rather than a number that would imply
+    it does.
+
+    The frame is returned as well as the score because the caller compares two runs to
+    check that a step's stated consequences match what the step actually did — see
+    :func:`_correct_against_measurement`.
     """
     dataset_bytes = _dataset_bytes(workspace.dataset)
     try:
         result = run_pipeline(generate(config, _source_of(workspace)), dataset_bytes)
     except ExecutionError:
-        return None
+        return None, None
     if not result.ok or result.frame is None:
-        return None
-    return assess(result.frame, config.target).score
+        return None, None
+    return assess(result.frame, config.target).score, result.frame
+
+
+def _score_of(config: PipelineConfig, workspace: Workspace) -> int | None:
+    """Health alone, for callers that do not need the frame."""
+    return _run_config(config, workspace)[0]
 
 
 # --------------------------------------------------------------------------------------

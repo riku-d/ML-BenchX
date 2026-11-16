@@ -172,15 +172,32 @@ df = {read_call}
 df.columns = [str(c) for c in df.columns]
 _initial_rows, _initial_cols = len(df), df.shape[1]
 
-MISSING_TOKENS = {missing_tokens!r}
+# Text that means "no value", in two kinds. MISSING_MARKERS are notations for absence --
+# an empty cell, "?", "null", "nan" -- and mean a gap however often they appear.
+# MISSING_WORDS are ordinary words that mean a gap only when they are a small share of
+# what is written in the column: "none" is the negative half of a yes/no column far more
+# often than it is a missing value, and blanking it wholesale drops the column.
+MISSING_MARKERS = {markers!r}
+MISSING_WORDS = {words!r}
+PLACEHOLDER_WORD_MAX_SHARE = {max_share!r}
+
+for _column in df.columns:
+    if df[_column].dtype != object:
+        continue
+    _present = df[_column].notna()
+    _written = int(_present.sum())
+    if not _written:
+        continue
+    _normalised = df[_column].astype("string").str.strip().str.lower()
+    _tokens = list(MISSING_MARKERS)
+    for _word in MISSING_WORDS:
+        if int((_normalised[_present] == _word).sum()) / _written <= PLACEHOLDER_WORD_MAX_SHARE:
+            _tokens.append(_word)
+    df.loc[_normalised.isin(_tokens) & _present, _column] = np.nan
+
 TEXT_NUMBER_COLUMNS = {numeric_columns!r}
 TEXT_DATE_COLUMNS = {date_columns!r}
 NUMERIC_NOISE = r"[,\\s ₹$€£%]"
-
-for _column in df.columns:
-    if df[_column].dtype == object:
-        _normalised = df[_column].astype("string").str.strip().str.lower()
-        df.loc[_normalised.isin(MISSING_TOKENS), _column] = np.nan
 
 for _column in TEXT_NUMBER_COLUMNS:
     if _column in df.columns:
@@ -350,12 +367,19 @@ def generate_from_plan(
         numeric_columns / date_columns / missing_tokens: the repairs ingestion applied,
             repeated here so the script rebuilds the same frame from the original bytes.
     """
+    from app.config import MISSING_WORDS, PLACEHOLDER_WORD_MAX_SHARE
     from app.services.ingest import MISSING_TOKENS
+
+    # The vocabulary arrives as one flat list, which is all a caller should have to
+    # know. Which half each token belongs to is this module's business, not theirs.
+    vocabulary = sorted(missing_tokens or MISSING_TOKENS)
 
     source = source or SourceFormat()
     body = _BODY.format(
         read_call=source.read_expression(),
-        missing_tokens=sorted(missing_tokens or MISSING_TOKENS),
+        markers=sorted(t for t in vocabulary if t not in MISSING_WORDS),
+        words=sorted(t for t in vocabulary if t in MISSING_WORDS),
+        max_share=PLACEHOLDER_WORD_MAX_SHARE,
         numeric_columns=list(numeric_columns or []),
         date_columns=list(date_columns or []),
     )

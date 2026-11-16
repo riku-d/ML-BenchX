@@ -35,7 +35,8 @@ import {
   type StepId,
   type Workspace as WorkspaceState,
 } from "../api";
-import { Badge, Button, Dialog, ScoreRing, Spinner } from "../components/ui";
+import { Badge, Button, Dialog, ScoreRing, Segmented, Spinner } from "../components/ui";
+import { resolveViewMode, type ViewMode } from "../explain/viewMode";
 import { PipelinePanel } from "./PipelinePanel";
 import { CodePanel } from "./CodePanel";
 import { InsightsPanel } from "./InsightsPanel";
@@ -219,11 +220,17 @@ function CompileResult({
 
 export function Workspace({
   datasetId,
+  view,
+  onViewChange,
   onExit,
   onReviewPlan,
   onDeleted,
 }: {
   datasetId: string;
+  /** The layout named in the URL, or null when it has not resolved one yet. */
+  view: ViewMode | null;
+  /** `remember` is false for the automatic first resolution, true for a real choice. */
+  onViewChange: (next: ViewMode, remember: boolean) => void;
   onExit: () => void;
   /** Open the propose -> review -> execute screen for this dataset. */
   onReviewPlan: () => void;
@@ -276,6 +283,14 @@ export function Workspace({
     );
     return () => clearInterval(timer);
   }, [compiling]);
+
+  // Put the resolved layout in the URL once, so a reload or a shared link lands in the
+  // same one. `remember: false` — this is the default being written down, not a choice
+  // the reader made, and recording it as a preference would overwrite a real one.
+  useEffect(() => {
+    if (view !== null || !workspace) return;
+    onViewChange(resolveViewMode(null, workspace.code_is_authoritative), false);
+  }, [view, workspace, onViewChange]);
 
   // Warn before leaving with work that has not been run.
   useEffect(() => {
@@ -413,6 +428,9 @@ export function Workspace({
     );
   }
 
+  const mode = view ?? resolveViewMode(null, workspace.code_is_authoritative);
+  const explaining = mode === "explain";
+
   const health =
     workspace.latest_compilation?.status === "success"
       ? (workspace.latest_compilation.health_after as { score: number }).score
@@ -445,7 +463,12 @@ export function Workspace({
           <span className="truncate font-mono text-[12.5px] text-text">
             {workspace.dataset.filename}
           </span>
-          <span className="tnum hidden shrink-0 font-mono text-[11px] text-faint md:inline">
+          {/* `lg:inline`, not `md:inline`. This span is `shrink-0`, so between 768 and
+              about 820px it kept its 53px while the filename beside it was squeezed to
+              zero — and painted straight over the "Review the plan" button, 52px of
+              overprint at 768. Revealed at exactly the width with no room for it, which
+              is the same mistake the Compile label makes at `sm` (audit F1). */}
+          <span className="tnum hidden shrink-0 font-mono text-[11px] text-faint lg:inline">
             {workspace.dataset.rows.toLocaleString()} × {workspace.dataset.columns}
           </span>
         </div>
@@ -463,6 +486,33 @@ export function Workspace({
           Delete dataset
         </Button>
 
+        {/* Which layout, not which features: both modes hold every panel, and only the
+            column widths differ.
+
+            Shown from xl, not lg, and that is a measurement rather than a preference.
+            At 1024px this header already fills its width exactly — 1024 of 1024 used —
+            and it clips rather than scrolls (audit F1), so adding a 107px control there
+            pushed 63px of the Compile button off the end where nothing could reach it.
+            Below xl the choice is still reachable through the `view` parameter in the
+            URL and through the remembered preference; it gets a visible control here
+            once F1 is fixed and the header can give up the room. */}
+        <div className="ml-1 hidden shrink-0 xl:block">
+          <Segmented
+            size="sm"
+            label="Workspace layout"
+            value={mode}
+            onChange={(next) => onViewChange(next, true)}
+            options={[
+              {
+                value: "explain",
+                label: "Explain",
+                hint: "Give the centre to the pipeline, where each step explains itself",
+              },
+              { value: "code", label: "Code", hint: "Give the centre to the editor" },
+            ]}
+          />
+        </div>
+
         {workspace.has_uncompiled_changes && (
           <Badge tone="warn" className="shrink-0">
             <span className="h-1 w-1 rounded-full bg-warn" /> uncompiled changes
@@ -478,8 +528,13 @@ export function Workspace({
           <button
             onClick={() => setSandboxOpen(true)}
             title="How your code is isolated"
-            className="hidden items-center gap-1.5 rounded-md px-2 py-1 font-mono text-[11px]
-              text-faint transition-colors hover:bg-raised hover:text-muted lg:flex"
+            /* Sans, not mono: "OS sandbox" is the application describing itself, not a
+               value out of the user's file, so the monospace boundary puts it in IBM
+               Plex Sans. In Plex Mono at this size the capital O was indistinguishable
+               from a zero, and the label reporting how the user's code is isolated read
+               as "05 sandbox". */
+            className="hidden items-center gap-1.5 rounded-md px-2 py-1 text-micro
+              text-muted transition-colors hover:bg-raised hover:text-text lg:flex"
           >
             <Shield size={11} />
             {workspace.sandbox.label}
@@ -543,14 +598,22 @@ export function Workspace({
         {compiling && <CompileOverlay phase={phase} />}
 
         <div className="flex min-h-0 flex-1">
-          {/* pipeline */}
+          {/* pipeline — the centre column in Explain, a side column in Code */}
           <aside
-            className={`w-full shrink-0 overflow-hidden border-line lg:w-[290px] lg:border-r xl:w-[320px] ${
-              mobileTab === "pipeline" ? "block" : "hidden lg:block"
-            }`}
+            className={`w-full overflow-hidden border-line lg:border-r ${
+              explaining
+                ? "min-w-0 flex-1"
+                : "shrink-0 lg:w-[290px] xl:w-[320px]"
+            } ${mobileTab === "pipeline" ? "block" : "hidden lg:block"}`}
           >
             <PipelinePanel
               workspace={workspace}
+              roomy={explaining}
+              onJumpToLine={(line) => {
+                setJumpToLine(line);
+                setMobileTab("code");
+                setTimeout(() => setJumpToLine(null), 100);
+              }}
               onConfigChange={changeConfig}
               onRequestImpact={requestToggle}
               impact={pendingToggle ? impact : null}
@@ -563,9 +626,13 @@ export function Workspace({
             />
           </aside>
 
-          {/* code */}
+          {/* code — never hidden in either mode, only narrower in Explain */}
           <main
-            className={`min-w-0 flex-1 ${mobileTab === "code" ? "block" : "hidden lg:block"}`}
+            className={`${
+              explaining
+                ? "w-full shrink-0 lg:w-[380px] xl:w-[460px]"
+                : "min-w-0 flex-1"
+            } ${mobileTab === "code" ? "block" : "hidden lg:block"}`}
           >
             <CodePanel
               workspace={workspace}
