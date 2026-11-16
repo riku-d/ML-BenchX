@@ -1100,6 +1100,48 @@ def read_upload(
 # --------------------------------------------------------------------------------------
 
 
+def source_kind(encoding: str, delimiter: str) -> str:
+    """Which reader re-reads a file, from the two fields ingestion records about it.
+
+    One definition, because there were two and they disagreed. Ingestion records a
+    different marker per format, and only one of them lands in ``delimiter``:
+
+    ==========  =====================  =====================
+    format      encoding               delimiter
+    ==========  =====================  =====================
+    csv         the detected encoding  the detected separator
+    excel       ``n/a (spreadsheet)``  ``sheet: <name>``
+    parquet     ``n/a (parquet)``      ``n/a (parquet)``
+    json        ``utf-8``              ``n/a (json)``
+    ==========  =====================  =====================
+
+    Both callers previously tested ``delimiter.startswith("n/a")``, which is true for
+    parquet and json and **false for Excel** — whose delimiter carries the sheet name.
+    An uploaded ``.xlsx`` therefore generated ``pd.read_csv(INPUT_PATH,
+    sep='sheet: enrolment', encoding='n/a (spreadsheet)')``, which raises
+    ``LookupError: unknown encoding`` before it reads a row. Every exported pipeline for
+    every spreadsheet was unrunnable.
+
+    Excel is detected from ``encoding`` *and* from the ``sheet:`` prefix, so neither
+    field alone has to be right.
+    """
+    encoding = (encoding or "").strip().lower()
+    delimiter = (delimiter or "").strip().lower()
+
+    if "spreadsheet" in encoding or delimiter.startswith("sheet:"):
+        return "excel"
+    if "parquet" in delimiter or "parquet" in encoding:
+        return "parquet"
+    if "json" in delimiter:
+        return "json"
+    if delimiter.startswith("n/a"):
+        # An unrecognised non-delimited format. Excel is the safest guess: it is the
+        # only one of the three a user is likely to have, and this preserves the
+        # previous behaviour of this branch.
+        return "excel"
+    return "csv"
+
+
 def loader_source(result: IngestResult) -> tuple[str, str]:
     """Python source that re-reads the user's file exactly as this module did.
 
@@ -1108,12 +1150,18 @@ def loader_source(result: IngestResult) -> tuple[str, str]:
     single column and fail on the first line. Returns ``(block, call)``: a chunk of
     source to paste into the script, and the expression that calls it.
     """
-    is_spreadsheet = result.delimiter.startswith("n/a")
+    kind = source_kind(result.encoding, result.delimiter)
     markers = sorted(MISSING_MARKERS)
     words = sorted(MISSING_WORDS)
 
-    if is_spreadsheet:
+    # One reader per format. Previously anything non-CSV was read with `read_excel`,
+    # which is wrong for parquet and json as surely as `read_csv` was wrong for Excel.
+    if kind == "excel":
         read_line = "    df = pd.read_excel(CSV_PATH)"
+    elif kind == "parquet":
+        read_line = "    df = pd.read_parquet(CSV_PATH)"
+    elif kind == "json":
+        read_line = "    df = pd.read_json(CSV_PATH)"
     else:
         read_line = (
             f"    df = pd.read_csv(CSV_PATH, sep={result.delimiter!r}, "

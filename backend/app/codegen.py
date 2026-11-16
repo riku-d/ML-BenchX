@@ -66,20 +66,23 @@ class SourceFormat:
     def from_dataset(cls, dataset: Any) -> "SourceFormat":
         """Read the format off a stored :class:`~app.db.Dataset`.
 
-        ``delimiter`` carries the file kind for non-delimited formats — ingestion writes
-        ``"n/a (parquet)"`` and friends — so the kind is recovered from it rather than
-        from the filename, which a user can rename.
+        The kind is recovered from the two fields ingestion records rather than from the
+        filename, which a user can rename. The rule lives in
+        :func:`~app.services.ingest.source_kind` — one definition, because this test
+        previously existed here *and* in ``ingest.loader_source`` and both got Excel
+        wrong: a spreadsheet's marker is in ``encoding``, while its ``delimiter`` holds
+        the sheet name, so ``delimiter.startswith("n/a")`` was false and every uploaded
+        ``.xlsx`` generated a `read_csv` call with the sheet name as its separator.
         """
+        from app.services.ingest import source_kind
+
         delimiter = str(getattr(dataset, "delimiter", ",") or ",")
         encoding = str(getattr(dataset, "encoding", "utf-8") or "utf-8")
 
-        if delimiter.startswith("n/a"):
-            if "parquet" in delimiter:
-                return cls(kind="parquet")
-            if "json" in delimiter:
-                return cls(kind="json")
-            return cls(kind="excel")
-        return cls(kind="csv", delimiter=delimiter, encoding=encoding)
+        kind = source_kind(encoding, delimiter)
+        if kind == "csv":
+            return cls(kind="csv", delimiter=delimiter, encoding=encoding)
+        return cls(kind=kind)  # type: ignore[arg-type]
 
     def read_expression(self) -> str:
         """The pandas call the script uses to load its input."""

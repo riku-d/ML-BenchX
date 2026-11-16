@@ -310,3 +310,72 @@ def test_the_representation_does_not_change_what_a_model_receives() -> None:
         assert np.allclose(
             scaler().fit_transform(points), scaler().fit_transform(fractions)
         ), f"{scaler.__name__} distinguishes the two representations"
+
+
+# --------------------------------------------------------------------------------------
+# Regression: the exported script must use the right reader for the uploaded format
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "encoding, delimiter, expected",
+    [
+        ("utf-8", ",", "csv"),
+        ("utf-8", ";", "csv"),
+        ("latin-1", "\t", "csv"),
+        # The one that was wrong. A spreadsheet records its marker in `encoding` and
+        # puts the sheet name in `delimiter`, so a test on `delimiter.startswith("n/a")`
+        # is false and the file is treated as CSV.
+        ("n/a (spreadsheet)", "sheet: enrolment", "excel"),
+        ("n/a (parquet)", "n/a (parquet)", "parquet"),
+        ("utf-8", "n/a (json)", "json"),
+    ],
+)
+def test_the_source_kind_is_recovered_from_what_ingestion_recorded(
+    encoding: str, delimiter: str, expected: str
+) -> None:
+    """One rule, covering every format ingestion can produce.
+
+    Found by uploading a real `.xlsx` through the running application: the workspace
+    generated `pd.read_csv(INPUT_PATH, sep='sheet: enrolment',
+    encoding='n/a (spreadsheet)')`, which dies with `LookupError: unknown encoding`
+    before reading a row. Every exported pipeline for every spreadsheet was unrunnable,
+    in both the workspace path and the plan path, because both carried their own copy of
+    the same wrong test.
+    """
+    from app.services.ingest import source_kind
+
+    assert source_kind(encoding, delimiter) == expected
+
+
+def test_an_excel_dataset_generates_read_excel_not_read_csv() -> None:
+    """The defect as the user met it: a generated script that cannot open its own input."""
+    from types import SimpleNamespace
+
+    from app.codegen import SourceFormat
+
+    spreadsheet = SimpleNamespace(
+        delimiter="sheet: enrolment", encoding="n/a (spreadsheet)"
+    )
+    source = SourceFormat.from_dataset(spreadsheet)
+
+    assert source.kind == "excel"
+    assert source.read_expression() == "pd.read_excel(INPUT_PATH)"
+    assert "read_csv" not in source.read_expression()
+    assert "sheet:" not in source.read_expression()
+
+
+def test_a_csv_dataset_still_carries_its_separator_and_encoding() -> None:
+    """The fix must not flatten the CSV path, which was always correct."""
+    from types import SimpleNamespace
+
+    from app.codegen import SourceFormat
+
+    source = SourceFormat.from_dataset(
+        SimpleNamespace(delimiter=";", encoding="latin-1")
+    )
+
+    assert source.kind == "csv"
+    assert source.read_expression() == (
+        "pd.read_csv(INPUT_PATH, sep=';', encoding='latin-1')"
+    )
