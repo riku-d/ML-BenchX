@@ -116,6 +116,59 @@ def test_a_dummy_baseline_is_scored_on_the_same_fold() -> None:
     assert all("beats_baseline" in row for row in winners)
 
 
+def test_a_target_with_no_signal_does_not_produce_six_models_that_beat_the_baseline() -> None:
+    """The defect this pins was found by measuring, not by reading.
+
+    On the project's own 10 MB fixture — whose target is ``rng.choice([0, 1])`` and so
+    carries no signal whatsoever — every family scored accuracy ≈ 0.50 and ROC-AUC
+    ≈ 0.50, correctly learning nothing. But ``DummyClassifier(most_frequent)`` scores
+    macro-F1 0.3356, because predicting one class only is punished by a macro average.
+    Against that single dummy all six "beat the baseline", and the leaderboard said so.
+
+    The bar is now the best of several trivial strategies, and a near-chance ROC-AUC
+    raises a note of its own. Either guard alone would have caught this; both are kept
+    because they fail for different reasons.
+    """
+    rng = np.random.default_rng(7)
+    X = pd.DataFrame(rng.normal(size=(600, 8)), columns=[f"f{i}" for i in range(8)])
+    y = pd.Series(rng.integers(0, 2, 600), name="y")  # pure noise, by construction
+    X_train, y_train, X_test, y_test = _split(X, y, at=450)
+
+    report = training.train_all(X_train, y_train, X_test, y_test, "binary classification")
+
+    bar = report.baseline["metrics"][report.primary_metric]
+    assert report.baseline["strategy"] in training.DUMMY_STRATEGIES
+    # The strongest trivial strategy must reach roughly coin-flip macro-F1, not the
+    # 0.33 that `most_frequent` alone would have set.
+    assert bar > 0.40, f"the baseline bar is still too weak: {bar:.4f}"
+
+    beat = [r for r in report.models if r["status"] == "succeeded" and r.get("beats_baseline")]
+    assert len(beat) < 6, (
+        "every family beat the trivial baseline on a target made of pure noise, "
+        f"which cannot be true — bar was {bar:.4f}"
+    )
+
+    assert any("coin flip" in note or "no signal" in note for note in report.notes), (
+        f"no note warned that nothing was learned; notes were {report.notes}"
+    )
+
+
+def test_the_baseline_reports_every_strategy_it_tried() -> None:
+    """So a reader can see which trivial model set the bar, and how far apart they were."""
+    X, y = _classification()
+    X_train, y_train, X_test, y_test = _split(X, y)
+
+    report = training.train_all(X_train, y_train, X_test, y_test, "binary classification")
+
+    assert set(report.baseline["strategies"]) == set(training.DUMMY_STRATEGIES)
+    best = report.baseline["metrics"][report.primary_metric]
+    for name, entry in report.baseline["strategies"].items():
+        if entry["status"] == "succeeded":
+            assert entry["metrics"][report.primary_metric] <= best + 1e-9, (
+                f"{name} scored better than the strategy chosen as the bar"
+            )
+
+
 def test_regression_is_scored_with_regression_metrics() -> None:
     X, y = _regression()
     X_train, y_train, X_test, y_test = _split(X, y)

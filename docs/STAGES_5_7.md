@@ -118,10 +118,13 @@ Six properties, each enforced in code and pinned by a test.
    `test_scores_are_measured_on_the_held_out_fold_not_the_training_fold` scores one
    training fold against two different held-out folds and fails if the numbers come out
    identical, which is what would happen if someone scored on `X_train`.
-2. **A trivial baseline on the same fold.** `DummyClassifier(most_frequent)` /
-   `DummyRegressor`, and every succeeded row carries `beats_baseline` and
-   `margin_over_baseline`. If nothing beats it, a note says the ranking is a ranking of
-   near-useless models.
+2. **The strongest trivial baseline on the same fold.** Four dummy strategies for
+   classification (`most_frequent`, `uniform`, `stratified`, `prior`) and two for
+   regression (`mean`, `median`); the best becomes the bar, and all are reported. Every
+   succeeded row carries `beats_baseline` and `margin_over_baseline`. **Taking the best
+   rather than the conventional one is load-bearing** — §7b records the measurement that
+   forced it, where a single `most_frequent` dummy let all six families claim to beat
+   the baseline on a target made of pure noise.
 3. **A family that did not run has a reason, never a zero.** A zero reads as "tried and
    terrible", which is a different and untrue statement.
 4. **All six are always listed.** A table that omits the failure lets a reader believe
@@ -293,19 +296,97 @@ tree and was exposed by the interpreter, not by the new code.
 
 ---
 
+## 7b. NFR-019 measured, and the defect that measuring it found
+
+The 10 MB fixture: **35,910 rows × 50 columns → 93 encoded features**, 28,728 train /
+7,182 held out.
+
+### End-to-end latency
+
+| Stage | Seconds |
+|---|---|
+| Upload + ingest | 6 |
+| Profile + propose plan | 7 |
+| Execute plan (preprocessing) | 8 |
+| **Train six families** | **43** |
+| **Total** | **64 s** |
+
+**NFR-019 asks for under 3 minutes. Measured: 64 seconds.** The budget holds on this
+hardware with the caps in §3 — and the earlier estimate in the execution plan (2.5–5
+minutes for training) was too pessimistic by roughly a factor of four.
+
+### What the caps bought
+
+| Family | Rows used | Seconds |
+|---|---|---|
+| SVM (RBF) | **8,000** of 28,728 | **32.1** |
+| Random Forest | 20,000 of 28,728 | 11.8 |
+| Decision Tree | 28,728 | 2.7 |
+| K-Nearest Neighbours | 20,000 | 2.6 |
+| Gradient Boosting | 28,728 | 0.6 |
+| Logistic Regression | 28,728 | 0.1 |
+
+The SVM at its 8,000-row cap is **32 of the 50 seconds of model time**. Uncapped at
+28,728 rows, quadratic scaling puts it near 7 minutes on its own, and NFR-019 fails.
+The cap is what makes the budget hold.
+
+**Observed speed-up was 1.55×, not 2.5×.** Six jobs on three workers cannot beat the
+longest single job: the SVM's 32 s sets the floor for a 50 s workload, so the wall clock
+is 32 s. This is Amdahl's law, not a defect in the pool, and the measured overlap was
+still 3 of 3. It is recorded here because a speed-up figure quoted without the critical
+path is a misleading number.
+
+### The defect this measurement found
+
+The 10 MB fixture's target is `rng.choice([0, 1])` — **pure noise, by construction.**
+Every family scored accuracy ≈ 0.50 and ROC-AUC ≈ 0.50, correctly learning nothing.
+
+**And all six reported `beats_baseline: true`.**
+
+`DummyClassifier(most_frequent)` predicts one class only, which a macro average punishes
+hard: it scored macro-F1 **0.3356**. A coin flip scores ≈ 0.50. So every family cleared
+the bar by about 0.17 while having learned precisely nothing, and the leaderboard said
+so in the interface.
+
+**Fix, in two independent parts** — either alone would have caught this, and both are
+kept because they fail for different reasons:
+
+1. **The bar is now the best of four trivial strategies** (`most_frequent`, `uniform`,
+   `stratified`, `prior`), not the conventional one. All four are scored and reported so
+   a reader can see which set the bar.
+2. **A near-chance ROC-AUC raises its own note.** If the best AUC across all families is
+   ≤ 0.55, the leaderboard says *"these features do not separate the classes — read this
+   as 'no signal found', not as a leaderboard."*
+
+**Measured before and after, on both datasets:**
+
+| Dataset | Bar before | Bar after | Beat the bar, before → after |
+|---|---|---|---|
+| `perf_10mb` (no signal) | `most_frequent` 0.3356 | **`uniform` 0.4969** | **6 of 6 → 3 of 6**, plus the no-signal note |
+| `campus_records` (real signal) | `most_frequent` 0.3671 | **`stratified` 0.5494** | 6 of 6 → 6 of 6, no note |
+
+The guard discriminates: it demotes the noise dataset and leaves the real one alone.
+Pinned by `test_a_target_with_no_signal_does_not_produce_six_models_that_beat_the_baseline`.
+
+This was a defect in Stage 5 as first written here, found by measuring rather than by
+reading — the same way the seven defects in AUDIT.md §1.1 were found.
+
+---
+
 ## 8. Test and build status
 
 | Command | Result |
 |---|---|
-| `pytest tests/test_training.py` | **16 passed** |
+| `pytest tests/` (whole suite) | **623 passed, 0 failed, 9 skipped** · coverage **89.60%** (gate 80%) |
+| `pytest tests/test_training.py` | **18 passed** |
 | `pytest tests/test_training_api.py` | **9 passed** |
-| `pytest tests/test_run.py tests/test_plan.py tests/test_metalearning.py` | **83 passed** |
+| `pytest tests/test_parity.py` | **41 passed** (36 were failing before the §7a fix) |
 | `tsc -b --noEmit` | clean |
 | `oxlint` | clean |
 | `vite build` | 352 kB main + 392 kB lazy plan chunk |
 | Full browser workflow | upload → profile → plan → override → run → train → leaderboard → SHAP → recommendation → download, all verified |
 
-25 tests were added. None of the existing tests was weakened, skipped or deleted.
+27 tests were added. None of the existing tests was weakened, skipped or deleted.
 
 ---
 
@@ -320,4 +401,6 @@ tree and was exposed by the interpreter, not by the new code.
 | 5 | `_estimators()` is duplicated | `scripts/build_corpus.py` and `services/training.py` carry the same six-family list. The script is documented as never importable from `app/`. **The two must be changed together** |
 | 6 | Corpus is 16 records | PRD.md §10 funds 50–100. Ten usable records clears `MIN_CORPUS` but is a thin basis for a ranking, and the rationale says so when the spread is wide |
 | 7 | No frontend tests | Carried forward from AUDIT.md §8.7. The new panel was verified by driving a live server |
-| 8 | NFR-019 not measured at 10 MB | Only the 1,505-row sample was timed end to end. The 3-minute budget at 10 MB remains unverified on this hardware |
+| 8 | ~~NFR-019 not measured at 10 MB~~ | **Closed — §7b.** Measured at 64 s against a 3-minute budget |
+| 9 | Speed-up is bounded by the SVM | At 10 MB the SVM is 32 s of 50 s of model time, so three workers give 1.55×, not 2.5×. More workers would not help; a cheaper kernel or a lower cap would |
+| 10 | The no-signal guard is a heuristic | ROC-AUC ≤ 0.55 is a threshold, not a proof. It will not fire for a regression task, where no equivalent check is implemented |

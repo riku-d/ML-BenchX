@@ -653,10 +653,17 @@ function ModelsPanel({ run }: { run: Run }) {
 
             <div className="mt-3 grid gap-2 sm:grid-cols-3">
               <div
-                title={`${board.baseline.estimator ?? "Dummy"} on the same held-out rows. A model that cannot beat this has learned nothing.`}
+                title={
+                  board.baseline.note ??
+                  `${board.baseline.estimator ?? "Dummy"} on the same held-out rows. A model that cannot beat this has learned nothing.`
+                }
               >
                 <Fact
-                  label="Trivial baseline"
+                  label={
+                    board.baseline.strategy
+                      ? `Trivial baseline (${board.baseline.strategy})`
+                      : "Trivial baseline"
+                  }
                   value={baselineValue === null ? "—" : metric(baselineValue)}
                   mono
                 />

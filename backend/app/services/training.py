@@ -468,29 +468,85 @@ class TrainingReport:
         }
 
 
+#: The trivial strategies a model must beat. **More than one on purpose.**
+#:
+#: A single ``most_frequent`` dummy is not a sufficient bar, and the failure is not
+#: hypothetical — it was measured on this project's own 10 MB fixture, whose target is
+#: ``rng.choice([0, 1])`` and therefore carries no signal at all. There, every one of the
+#: six families scored accuracy ≈ 0.50 and ROC-AUC ≈ 0.50 — correctly learning nothing —
+#: while ``most_frequent`` scored macro-F1 0.3356, because predicting one class only is
+#: penalised hard by a macro average. Measured against that single dummy, all six
+#: "beat the baseline", and the leaderboard would have said so.
+#:
+#: The honest bar is the **best score any model that ignores the features can reach**,
+#: so every strategy is scored and the strongest one becomes the bar. ``uniform`` and
+#: ``stratified`` are what catch a coin-flip dressed as a result.
+DUMMY_STRATEGIES: tuple[str, ...] = ("most_frequent", "uniform", "stratified", "prior")
+
+#: Regression's equivalent. ``mean`` scores R² = 0 by construction; ``median`` can beat
+#: it on a skewed target, which is exactly when a weak model looks good against ``mean``.
+DUMMY_REGRESSION_STRATEGIES: tuple[str, ...] = ("mean", "median")
+
+
 def _baseline(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     X_test: pd.DataFrame,
     y_test: pd.Series,
     classification: bool,
+    metric: str,
+    seed: int,
 ) -> dict[str, Any]:
-    """The trivial model, scored on the same held-out rows as the six.
+    """The strongest trivial model, scored on the same held-out rows as the six.
 
     Without this the leaderboard has a winner but no sense of whether winning meant
     anything. A majority-class classifier on a 95/5 split scores 0.95 accuracy, and a
     family that ties it has learned nothing.
+
+    Every strategy in :data:`DUMMY_STRATEGIES` is fitted and scored; the one with the
+    best primary metric becomes the bar, and all of them are reported so a reader can
+    see which one set it. Taking the best rather than the conventional one is the whole
+    point — see the note on that constant.
     """
-    model = (
-        DummyClassifier(strategy="most_frequent") if classification else DummyRegressor()
-    )
-    try:
-        with threadpool_limits(limits=1):
-            model.fit(X_train, y_train)
-            metrics = _metrics(model, X_test, y_test, classification)
-        return {"status": "succeeded", "estimator": type(model).__name__, "metrics": metrics}
-    except Exception as exc:  # noqa: BLE001
-        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"[:300]}
+    strategies = DUMMY_STRATEGIES if classification else DUMMY_REGRESSION_STRATEGIES
+    scored: dict[str, Any] = {}
+    best_name: str | None = None
+    best_value: float | None = None
+
+    for strategy in strategies:
+        model = (
+            DummyClassifier(strategy=strategy, random_state=seed)
+            if classification
+            else DummyRegressor(strategy=strategy)
+        )
+        try:
+            with threadpool_limits(limits=1):
+                model.fit(X_train, y_train)
+                metrics = _metrics(model, X_test, y_test, classification)
+        except Exception as exc:  # noqa: BLE001 - a strategy that cannot fit is not fatal
+            scored[strategy] = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"[:200]}
+            continue
+
+        scored[strategy] = {"status": "succeeded", "metrics": metrics}
+        value = metrics.get(metric)
+        if value is not None and np.isfinite(value) and (best_value is None or value > best_value):
+            best_value, best_name = float(value), strategy
+
+    if best_name is None:
+        return {"status": "failed", "reason": "No trivial strategy could be fitted.", "strategies": scored}
+
+    return {
+        "status": "succeeded",
+        "estimator": "DummyClassifier" if classification else "DummyRegressor",
+        "strategy": best_name,
+        "metrics": scored[best_name]["metrics"],
+        "strategies": scored,
+        "note": (
+            f"The bar is the best of {len(strategies)} trivial strategies — here "
+            f"{best_name!r} at {best_value:.4f} {metric}. A single majority-class dummy "
+            "is a weaker bar than it looks under a macro average."
+        ),
+    }
 
 
 def train_all(
@@ -564,7 +620,7 @@ def train_all(
             outcome = future.result()
             outcomes[outcome.family] = outcome
 
-    baseline = _baseline(X_train, y_train, X_test, y_test, classification)
+    baseline = _baseline(X_train, y_train, X_test, y_test, classification, metric, seed)
     duration_ms = int(clock() * 1000)
 
     spans = [(one.started, one.finished) for one in outcomes.values()]
@@ -616,8 +672,30 @@ def train_all(
         if top <= baseline_value:
             notes.append(
                 f"No family beat the trivial baseline on {metric} "
-                f"({top:.4f} against {baseline_value:.4f}). Treat the ranking as "
-                "a ranking of near-useless models, not as a result."
+                f"({top:.4f} against {baseline_value:.4f}, strategy "
+                f"{baseline.get('strategy')!r}). Treat the ranking as a ranking of "
+                "near-useless models, not as a result."
+            )
+        if baseline.get("note"):
+            notes.append(baseline["note"])
+
+    # A second, independent reading of "did anything actually learn". The baseline
+    # comparison answers "better than guessing at this metric"; this answers "better
+    # than chance at separating the classes", which a metric-relative comparison can
+    # miss. Both were needed: on a target with no signal at all, every family can clear
+    # a majority-class dummy on macro-F1 while sitting at 0.50 ROC-AUC.
+    if classification:
+        aucs = [
+            row["metrics"].get("roc_auc")
+            for row in models
+            if row["status"] == "succeeded" and row["metrics"].get("roc_auc") is not None
+        ]
+        if aucs and max(aucs) <= 0.55:
+            notes.append(
+                f"The best ROC-AUC across all families is {max(aucs):.4f}, which is "
+                "close to the 0.50 of a coin flip. Whatever the ranking says, these "
+                "features do not separate the classes — read this as 'no signal "
+                "found', not as a leaderboard."
             )
 
     failures = [one for one in models if one["status"] != "succeeded"]

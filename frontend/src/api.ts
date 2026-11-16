@@ -500,10 +500,24 @@ export type Leaderboard = {
   task: string;
   primary_metric: string;
   best_family: string | null;
+  /**
+   * The strongest trivial model, not the conventional one.
+   *
+   * `strategy` names which of the dummies set the bar. Several are scored and the best
+   * wins, because a single majority-class dummy is a far weaker bar than it looks under
+   * a macro average — measured on a no-signal dataset, it let all six families claim to
+   * beat it while sitting at 0.50 ROC-AUC.
+   */
   baseline: {
     status: string;
     estimator?: string;
+    strategy?: string;
     metrics?: Record<string, number | number[][] | string[] | null>;
+    strategies?: Record<
+      string,
+      { status: string; metrics?: Record<string, number | number[][] | string[] | null>; reason?: string }
+    >;
+    note?: string;
     reason?: string;
   };
   /** Measured, not assumed — see `services/training.py`. */
