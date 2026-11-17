@@ -441,12 +441,19 @@ class ChartBoundary extends Component<
     /** What to show instead of the chart. Defaults to a sentence. */
     fallback?: ReactNode;
   },
-  { failed: boolean; key: string | number | undefined }
+  { failed: boolean; key: string | number | undefined; reason: string }
 > {
-  state = { failed: false, key: this.props.resetKey };
+  state = { failed: false, key: this.props.resetKey, reason: "" };
 
-  static getDerivedStateFromError() {
-    return { failed: true };
+  static getDerivedStateFromError(error: unknown) {
+    // The message is kept and shown. A boundary that swallows the reason turns one
+    // debuggable exception into an unexplained blank, and the person who can see the
+    // failure is rarely the person who can read the console.
+    const reason =
+      error instanceof Error
+        ? `${error.name}: ${error.message}`
+        : String(error ?? "unknown error");
+    return { failed: true, reason };
   }
 
   static getDerivedStateFromProps(
@@ -456,26 +463,33 @@ class ChartBoundary extends Component<
     // New data is a new attempt. Compared here rather than in an effect because a class
     // boundary must decide before it renders the fallback again.
     if (props.resetKey !== state.key) {
-      return { failed: false, key: props.resetKey };
+      return { failed: false, key: props.resetKey, reason: "" };
     }
     return null;
   }
 
-  componentDidCatch(error: unknown) {
+  componentDidCatch(error: unknown, info: { componentStack?: string | null }) {
     // Kept visible in the console: the numbers are still on screen, so this would
     // otherwise fail silently and nobody would know the chart was missing.
-    console.error("Chart failed to render; the figures above are unaffected.", error);
+    console.error("Chart failed to render; the figures above are unaffected.", error, info);
   }
 
   render() {
     if (this.state.failed) {
       return (
-        this.props.fallback ?? (
-          <p className="text-xs text-faint">
-            The chart could not be drawn. The figures it would have shown are in the
-            table above.
-          </p>
-        )
+        <>
+          {this.state.reason ? (
+            <p className="mt-1 font-mono text-[10px] text-warn">
+              Chart error: {this.state.reason}
+            </p>
+          ) : null}
+          {this.props.fallback ?? (
+            <p className="text-xs text-faint">
+              The chart could not be drawn. The figures it would have shown are in the
+              table above.
+            </p>
+          )}
+        </>
       );
     }
     return this.props.children;
