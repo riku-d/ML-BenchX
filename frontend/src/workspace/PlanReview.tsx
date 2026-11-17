@@ -389,7 +389,7 @@ function ColumnRow({
                 <p className="mb-2 text-ui font-medium text-muted">
                   How the values are spread
                 </p>
-                <ChartBoundary>
+                <ChartBoundary resetKey={column.column}>
                   <ColumnHistogram histogram={profile?.histogram} />
                 </ChartBoundary>
                 {scriptUrl && (
@@ -426,13 +426,39 @@ function ColumnRow({
  * produces the same throw.
  */
 class ChartBoundary extends Component<
-  { children: ReactNode },
-  { failed: boolean }
+  {
+    children: ReactNode;
+    /**
+     * Changing this clears a previous failure.
+     *
+     * Without it the boundary latched: one transient throw set `failed` and nothing
+     * ever unset it, so the fallback outlived the error. Retraining the same dataset
+     * re-renders this boundary rather than remounting it, which meant a chart that
+     * failed once stayed "could not be drawn" for fresh, perfectly good data until the
+     * page was reloaded. Keyed on the data, a new explanation gets a new attempt.
+     */
+    resetKey?: string | number;
+    /** What to show instead of the chart. Defaults to a sentence. */
+    fallback?: ReactNode;
+  },
+  { failed: boolean; key: string | number | undefined }
 > {
-  state = { failed: false };
+  state = { failed: false, key: this.props.resetKey };
 
   static getDerivedStateFromError() {
     return { failed: true };
+  }
+
+  static getDerivedStateFromProps(
+    props: { resetKey?: string | number },
+    state: { failed: boolean; key: string | number | undefined },
+  ) {
+    // New data is a new attempt. Compared here rather than in an effect because a class
+    // boundary must decide before it renders the fallback again.
+    if (props.resetKey !== state.key) {
+      return { failed: false, key: props.resetKey };
+    }
+    return null;
   }
 
   componentDidCatch(error: unknown) {
@@ -444,14 +470,70 @@ class ChartBoundary extends Component<
   render() {
     if (this.state.failed) {
       return (
-        <p className="text-xs text-faint">
-          The chart could not be drawn. The figures it would have shown are in the table
-          above.
-        </p>
+        this.props.fallback ?? (
+          <p className="text-xs text-faint">
+            The chart could not be drawn. The figures it would have shown are in the
+            table above.
+          </p>
+        )
       );
     }
     return this.props.children;
   }
+}
+
+/**
+ * The same numbers the chart would have drawn, as a table.
+ *
+ * Shown when the chart cannot render. These are the values the explainer actually
+ * produced — the identical array the chart is fed — so a failure to draw costs the
+ * picture and not the result.
+ */
+function ImportanceTable({
+  features,
+  unit,
+}: {
+  features: { feature: string; value: number }[];
+  unit: string;
+}) {
+  if (!features.length) {
+    return <p className="text-xs text-faint">No importances were returned.</p>;
+  }
+  const largest = Math.max(...features.map((f) => Math.abs(f.value)), 0);
+  return (
+    <div className="mt-2 overflow-x-auto">
+      <table className="w-full text-left text-xs">
+        <thead className="text-faint">
+          <tr className="border-b border-line">
+            <th className="py-1 pr-2 font-normal">#</th>
+            <th className="py-1 pr-2 font-normal">Feature</th>
+            <th className="py-1 pr-2 text-right font-normal">{unit}</th>
+            <th className="py-1 font-normal">share of the largest</th>
+          </tr>
+        </thead>
+        <tbody className="font-mono">
+          {features.map((f, index) => (
+            <tr key={f.feature} className="border-b border-line/50">
+              <td className="py-1 pr-2 text-faint">{index + 1}</td>
+              <td className="py-1 pr-2 font-sans">{f.feature}</td>
+              <td className="py-1 pr-2 text-right">
+                {Math.abs(f.value) >= 1000
+                  ? f.value.toFixed(1)
+                  : f.value.toPrecision(4)}
+              </td>
+              <td className="py-1 text-faint">
+                {largest > 0 ? `${((Math.abs(f.value) / largest) * 100).toFixed(0)}%` : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt-1 text-[10px] text-faint">
+        Shown as a table because the chart could not be drawn. These are the explainer's
+        own values, unchanged.
+      </p>
+    </div>
+  );
 }
 
 /** A metric's value, formatted, or a dash where there is genuinely no number. */
@@ -499,6 +581,10 @@ function ImportanceChart({
             width={150}
             tick={{ fontSize: 9, fill: "var(--color-muted)" }}
             stroke="var(--color-line-strong)"
+            // Every bar gets its name. The default thins category ticks when it judges
+            // them crowded, which on this chart silently left bars unlabelled — and an
+            // unlabelled importance bar says nothing at all.
+            interval={0}
           />
           <Tooltip
             contentStyle={{
@@ -509,7 +595,17 @@ function ImportanceChart({
             }}
             cursor={{ fill: "var(--color-line)" }}
           />
-          <Bar dataKey="value" radius={[0, 2, 2, 0]} fill="var(--color-accent)" />
+          {/* Animation off. The entry transition starts every bar at zero width, so any
+              renderer that does not run the full 1.5s of frames — a headless capture, a
+              screenshot, a tab that never gets painted — shows labelled axes with no
+              bars at all, which reads as a broken chart rather than a slow one. These
+              are static importances; there is nothing for the motion to convey. */}
+          <Bar
+            dataKey="value"
+            radius={[0, 2, 2, 0]}
+            fill="var(--color-accent)"
+            isAnimationActive={false}
+          />
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -544,6 +640,14 @@ function ModelsPanel({
 }) {
   const [board, setBoard] = useState<Leaderboard | null>(null);
   const [explanation, setExplanation] = useState<Explanation | null>(null);
+  /**
+   * Bumped every time an explanation is fetched, and used to reset the chart's error
+   * boundary. Keyed on a counter rather than on the values themselves because the
+   * values are deterministic: retraining the same dataset yields an identical payload,
+   * so a value-derived key would never change and a chart that failed once could never
+   * recover.
+   */
+  const [explainEpoch, setExplainEpoch] = useState(0);
   const [advice, setAdvice] = useState<Recommendation | null>(null);
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<string>("");
@@ -560,7 +664,10 @@ function ModelsPanel({
       api.readExplanation(runId).catch(() => null),
     ]);
     if (models) setBoard(models);
-    if (explain) setExplanation(explain);
+    if (explain) {
+      setExplanation(explain);
+      setExplainEpoch((n) => n + 1);
+    }
   }, [runId]);
 
   useEffect(() => {
@@ -607,6 +714,7 @@ function ModelsPanel({
       setStage("Fitting six models…");
       setBoard(await api.trainRun(target.id));
       setExplanation(await api.readExplanation(target.id).catch(() => null));
+      setExplainEpoch((n) => n + 1);
       api
         .recommendation(target.id)
         .then(setAdvice)
@@ -813,7 +921,15 @@ function ModelsPanel({
             <p className="mt-1 text-xs text-warn">{explanation.fallback_reason}</p>
           ) : null}
           <div className="mt-2">
-            <ChartBoundary>
+            <ChartBoundary
+              resetKey={explainEpoch}
+              fallback={
+                <ImportanceTable
+                  features={explanation.features ?? []}
+                  unit={explanation.is_shap ? "mean |SHAP|" : "importance"}
+                />
+              }
+            >
               <ImportanceChart features={explanation.features ?? []} />
             </ChartBoundary>
           </div>
