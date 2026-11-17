@@ -157,10 +157,12 @@ async def _reject_oversized_bodies(request: Request, call_next):
     """
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES:
-        return JSONResponse(
-            status_code=413,
-            content={"error": _too_large_message()},
-        )
+        # Through `_envelope` like every other refusal. This middleware previously built
+        # `{"error": ...}` by hand and so was the one path that answered without `code`,
+        # `message` and `detail` — the three fields PRD.md §7.3.1 specifies and the
+        # interface reads. A client checking `message` got nothing back for the most
+        # likely upload failure there is, even though 413 was already in `_ERROR_CODES`.
+        return _envelope(413, _too_large_message())
     return await call_next(request)
 
 

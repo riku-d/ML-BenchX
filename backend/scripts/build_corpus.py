@@ -116,6 +116,33 @@ SEED_DATASETS: tuple[tuple[int, str, str], ...] = (
     (1510, "wdbc", "Class"),
     (6332, "cylinder-bands", "band_type"),
     (23381, "dresses-sales", "Class"),
+    # --- regression ------------------------------------------------------------------
+    #
+    # Added 16 Nov 2026. The list above is drawn from OpenML-CC18, which is a
+    # *classification* benchmark, so the corpus held 16 classification records and zero
+    # regression ones. `metalearning._usable` filters records to the query's own task —
+    # a classification corpus cannot inform a regression — so every regression dataset
+    # got a refusal rather than a ranking. The engine was behaving correctly; it had
+    # nothing to compare against.
+    #
+    # Nothing in the builder needed changing: `_estimators(classification=False)` and
+    # the task detection at `plan.task` already handled regression. This is the data
+    # that was missing. Targets are verified column names, not guesses.
+    (189, "kin8nm", "y"),
+    (537, "houses", "median_house_value"),
+    (560, "bodyfat", "class"),
+    (507, "space_ga", "ln(VOTES/POP)"),
+    (561, "cpu", "class"),
+    (223, "stock", "company10"),
+    (549, "strikes", "strike_volume"),
+    (215, "2dplanes", "y"),
+    # The first eight produced six *usable* records — two were assigned to the holdout
+    # reserve, which the similarity search excludes — against a MIN_CORPUS of 8. These
+    # four take the usable regression corpus over that floor.
+    (547, "no2", "no2_concentration"),
+    (522, "pm10", "pm10_concentration"),
+    (556, "analcatdata_apnea2", "Count"),
+    (567, "fishcatch", "algae_1"),
 )
 
 
